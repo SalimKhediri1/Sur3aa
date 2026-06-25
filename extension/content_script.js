@@ -21,8 +21,8 @@ function createPanel() {
   panel.style.bottom = '80px';
   panel.style.right = '24px';
   panel.style.width = '240px';
-  panel.style.background = '#1a0f2e';
-  panel.style.border = '1px solid #4c1d95';
+  panel.style.background = '#1C2033';
+  panel.style.border = '1px solid #8B0000';
   panel.style.borderRadius = '10px';
   panel.style.padding = '14px';
   panel.style.zIndex = '9999';
@@ -33,7 +33,7 @@ function createPanel() {
   header.textContent = 'Choose format';
   header.style.fontSize = '13px';
   header.style.fontWeight = '500';
-  header.style.color = '#c4b5fd';
+  header.style.color = '#FF4444';
   header.style.marginBottom = '10px';
   header.style.display = 'flex';
   header.style.justifyContent = 'space-between';
@@ -43,7 +43,7 @@ function createPanel() {
   closeBtn.textContent = '✕';
   closeBtn.style.background = 'none';
   closeBtn.style.border = 'none';
-  closeBtn.style.color = '#c4b5fd';
+  closeBtn.style.color = '#FF4444';
   closeBtn.style.cursor = 'pointer';
   closeBtn.style.fontSize = '13px';
   closeBtn.style.opacity = '0.5';
@@ -66,10 +66,10 @@ function showFormats(contentDiv, formats) {
     btn.textContent = format.label;
     btn.style.display = 'block';
     btn.style.width = '100%';
-    btn.style.background = 'rgba(124,58,237,0.15)';
-    btn.style.border = '1px solid rgba(124,58,237,0.3)';
+    btn.style.background = 'rgba(204,0,0,0.12)';
+    btn.style.border = '1px solid rgba(204,0,0,0.35)';
     btn.style.borderRadius = '6px';
-    btn.style.color = '#ddd6fe';
+    btn.style.color = '#FFAAAA';
     btn.style.fontSize = '13px';
     btn.style.padding = '7px 10px';
     btn.style.marginBottom = '6px';
@@ -78,8 +78,8 @@ function showFormats(contentDiv, formats) {
     btn.style.fontFamily = 'sans-serif';
     // The audio-only option gets a brighter purple accent to stand out
     if (format.type === 'audio') {
-      btn.style.borderColor = '#7C3AED';
-      btn.style.color = '#a78bfa';
+      btn.style.borderColor = '#CC0000';
+      btn.style.color = '#FF4444';
     }
     btn.addEventListener('click', () => {
       triggerDownload(format);
@@ -111,8 +111,8 @@ function showStatus(message, type) {
   }
   el.textContent = message;
   if (type === 'pending') {
-    el.style.background = 'rgba(124,58,237,0.15)';
-    el.style.color = '#c4b5fd';
+    el.style.background = 'rgba(204,0,0,0.15)';
+    el.style.color = '#FF4444';
   }
   if (type === 'done') {
     el.style.background = 'rgba(0,200,100,0.15)';
@@ -189,7 +189,7 @@ function injectButton() {
   btn.id = 'sur3aa-btn';
   btn.style.marginLeft = '10px';
   btn.style.padding = '6px 14px';
-  btn.style.background = '#7C3AED';
+  btn.style.background = '#CC0000';
   btn.style.color = '#ffffff';
   btn.style.border = 'none';
   btn.style.borderRadius = '18px';

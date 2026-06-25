@@ -331,6 +331,8 @@ async function triggerDownload(format) {
 
 function onVideoPage() {
   console.log('[Sur3aa] video page detected:', window.location.href);
+  // Clear any prior video's formats so a new page never shows stale options
+  cachedFormats = null;
   prefetchFormats(window.location.href);
 
   injectButton();

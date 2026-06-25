@@ -32,38 +32,41 @@ router.get('/formats', (req, res) => {
         return res.status(500).json({ error: 'failed to fetch formats' });
       }
 
-      const raw = parsed.formats || [];
+      const formats = parsed.formats || [];
 
-      // Keep only formats that have both video and audio tracks
-      const combined = raw.filter(
-        (f) => f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
+      // YouTube serves video and audio as separate DASH streams — keep the
+      // video-only streams (no merged audio) so we see every real resolution
+      const videoStreams = formats.filter(f =>
+        f.vcodec && f.vcodec !== 'none' &&
+        (!f.acodec || f.acodec === 'none') &&
+        f.height
       );
 
-      // Deduplicate by height, keeping first occurrence
-      const seenHeights = new Set();
-      const deduped = combined.filter((f) => {
-        const key = f.height ?? 'unknown';
-        if (seenHeights.has(key)) return false;
-        seenHeights.add(key);
+      // Deduplicate by height — keep only the first entry per height value
+      const seen = new Set();
+      const unique = videoStreams.filter(f => {
+        if (seen.has(f.height)) return false;
+        seen.add(f.height);
         return true;
       });
 
       // Sort by height descending
-      deduped.sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
+      unique.sort((a, b) => b.height - a.height);
 
-      const videoFormats = deduped.map((f) => ({
-        format_id: f.format_id,
-        label: (f.height ? `${f.height}p` : 'Unknown resolution') + ' — video + audio',
-        type: 'video',
+      // Use yt-dlp selector syntax so it merges with the best audio at download
+      const videoFormats = unique.map(f => ({
+        format_id: `bestvideo[height<=${f.height}]+bestaudio/best`,
+        label: f.height >= 2160 ? `4K — video + audio` : `${f.height}p — video + audio`,
+        type: 'video'
       }));
 
-      const audioFormat = {
-        format_id: 'bestaudio/best',
-        label: 'Audio only (mp3)',
-        type: 'audio',
-      };
+      // Always offer audio-only as the final option
+      const result = [
+        ...videoFormats,
+        { format_id: 'bestaudio/best', label: 'Audio only (mp3)', type: 'audio' }
+      ];
 
-      res.json({ formats: [...videoFormats, audioFormat] });
+      return res.json({ formats: result });
     });
   } catch {
     res.status(500).json({ error: 'failed to fetch formats' });

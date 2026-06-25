@@ -9,6 +9,11 @@ let downloadInProgress = false;
 let cachedFormats = null;
 let formatsLoading = false;
 
+// Single source of truth for the injected progress panel: jobId -> job data.
+// progressPollInterval holds the poll loop so it can be cleared when idle.
+const activeJobs = {};
+let progressPollInterval = null;
+
 // Static format list — yt-dlp resolves the best match at download time
 const STATIC_FORMATS = [
   { format_id: 'bestvideo[height<=2160]+bestaudio/best', label: '4K (best available)', type: 'video' },
@@ -281,6 +286,233 @@ function injectButton() {
   target.appendChild(btn);
 }
 
+// Shorten a YouTube URL to a readable label (mirrors popup.js)
+function progressExtractTitle(url) {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    const videoId = parsed.searchParams.get('v');
+    if (videoId) return 'youtu.be/' + videoId;
+  } catch {
+    // fall through to truncation
+  }
+  return url.length > 40 ? url.slice(0, 40) : url;
+}
+
+// Human-readable badge text per job status
+const PROGRESS_STATUS_LABELS = {
+  pending: 'Downloading',
+  done: 'Done',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+// Builds and returns the persistent progress panel element
+function createProgressPanel() {
+  const panel = document.createElement('div');
+  panel.id = 'sur3aa-progress-panel';
+  panel.style.position = 'fixed';
+  panel.style.bottom = '24px';
+  panel.style.right = '24px';
+  panel.style.width = '300px';
+  panel.style.zIndex = '10000';
+  panel.style.background = '#1C2033';
+  panel.style.border = '1px solid #8B0000';
+  panel.style.borderRadius = '10px';
+  panel.style.fontFamily = 'sans-serif';
+  panel.style.fontSize = '13px';
+  panel.style.overflow = 'hidden';
+
+  const header = document.createElement('div');
+  header.style.display = 'flex';
+  header.style.justifyContent = 'space-between';
+  header.style.alignItems = 'center';
+  header.style.padding = '10px 14px';
+  header.style.borderBottom = '1px solid rgba(139,0,0,0.4)';
+  header.style.color = '#FF4444';
+  header.style.fontWeight = '500';
+  header.style.fontSize = '13px';
+
+  const title = document.createElement('span');
+  title.textContent = 'Sur3aa — Downloads';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.style.background = 'none';
+  closeBtn.style.border = 'none';
+  closeBtn.style.color = '#FF4444';
+  closeBtn.style.cursor = 'pointer';
+  closeBtn.style.fontSize = '13px';
+  closeBtn.style.opacity = '0.6';
+  // Closing cleanly stops all polling and clears the panel's state
+  closeBtn.addEventListener('click', () => {
+    panel.remove();
+    clearInterval(progressPollInterval);
+    progressPollInterval = null;
+    for (const id in activeJobs) delete activeJobs[id];
+  });
+
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+
+  const content = document.createElement('div');
+  content.id = 'sur3aa-progress-content';
+  content.style.padding = '10px 14px';
+
+  panel.appendChild(header);
+  panel.appendChild(content);
+  return panel;
+}
+
+// Re-renders the panel body from activeJobs
+function renderProgressPanel() {
+  const content = document.getElementById('sur3aa-progress-content');
+  if (!content) return;
+  content.innerHTML = '';
+
+  Object.keys(activeJobs).forEach((jobId) => {
+    const job = activeJobs[jobId];
+
+    const wrapper = document.createElement('div');
+    wrapper.style.marginBottom = '10px';
+
+    // Top row: title + status badge
+    const top = document.createElement('div');
+    top.style.display = 'flex';
+    top.style.justifyContent = 'space-between';
+    top.style.marginBottom = '5px';
+
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = progressExtractTitle(job.url);
+    titleSpan.style.fontSize = '11px';
+    titleSpan.style.color = '#aaa';
+    titleSpan.style.overflow = 'hidden';
+    titleSpan.style.textOverflow = 'ellipsis';
+    titleSpan.style.whiteSpace = 'nowrap';
+    titleSpan.style.maxWidth = '180px';
+
+    const badge = document.createElement('span');
+    badge.textContent = PROGRESS_STATUS_LABELS[job.status] || job.status;
+    badge.style.fontSize = '11px';
+    badge.style.padding = '2px 8px';
+    badge.style.borderRadius = '10px';
+    if (job.status === 'pending') {
+      badge.style.background = 'rgba(204,0,0,0.2)';
+      badge.style.color = '#FF4444';
+    } else if (job.status === 'done') {
+      badge.style.background = 'rgba(0,200,100,0.15)';
+      badge.style.color = '#86efac';
+    } else if (job.status === 'failed') {
+      badge.style.background = 'rgba(239,68,68,0.15)';
+      badge.style.color = '#fca5a5';
+    } else if (job.status === 'cancelled') {
+      badge.style.background = 'rgba(100,100,100,0.2)';
+      badge.style.color = '#aaa';
+    }
+
+    top.appendChild(titleSpan);
+    top.appendChild(badge);
+
+    // Progress bar
+    const barBg = document.createElement('div');
+    barBg.style.height = '4px';
+    barBg.style.background = 'rgba(255,255,255,0.1)';
+    barBg.style.borderRadius = '2px';
+    barBg.style.marginBottom = '5px';
+    barBg.style.overflow = 'hidden';
+
+    const fill = document.createElement('div');
+    fill.style.height = '100%';
+    fill.style.background = '#CC0000';
+    fill.style.borderRadius = '2px';
+    fill.style.width = (job.percent || 0) + '%';
+    barBg.appendChild(fill);
+
+    // Bottom row: detail text + cancel button (pending only)
+    const bottom = document.createElement('div');
+    bottom.style.display = 'flex';
+    bottom.style.justifyContent = 'space-between';
+    bottom.style.alignItems = 'center';
+
+    const detail = document.createElement('span');
+    detail.style.fontSize = '11px';
+    detail.style.color = '#888';
+    detail.textContent = job.status === 'pending'
+      ? `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`
+      : '';
+    bottom.appendChild(detail);
+
+    if (job.status === 'pending') {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.style.background = 'none';
+      cancelBtn.style.border = '1px solid #8B0000';
+      cancelBtn.style.borderRadius = '4px';
+      cancelBtn.style.color = '#FF4444';
+      cancelBtn.style.fontSize = '11px';
+      cancelBtn.style.padding = '2px 8px';
+      cancelBtn.style.cursor = 'pointer';
+      cancelBtn.style.fontFamily = 'sans-serif';
+      cancelBtn.addEventListener('click', () => cancelDownload(jobId));
+      bottom.appendChild(cancelBtn);
+    }
+
+    wrapper.appendChild(top);
+    wrapper.appendChild(barBg);
+    wrapper.appendChild(bottom);
+    content.appendChild(wrapper);
+  });
+}
+
+// Asks the server to cancel a job, then refreshes the panel
+async function cancelDownload(jobId) {
+  try {
+    await fetch('http://localhost:3333/download/' + jobId, { method: 'DELETE' });
+  } catch {
+    // ignore — the poll below reflects whatever state the server reports
+  }
+  pollProgressPanel();
+}
+
+// Ensures exactly one progress panel is present in the page
+function ensureProgressPanel() {
+  if (!document.getElementById('sur3aa-progress-panel')) {
+    document.body.appendChild(createProgressPanel());
+  }
+}
+
+// Polls the server's job list, updates activeJobs, and re-renders.
+// Stops polling and clears the panel once every job is in a terminal state.
+async function pollProgressPanel() {
+  let data;
+  try {
+    const res = await fetch('http://localhost:3333/download/jobs');
+    if (!res.ok) return;
+    data = await res.json();
+  } catch {
+    return;
+  }
+
+  (data.jobs || []).forEach((job) => {
+    activeJobs[job.jobId] = job;
+  });
+  renderProgressPanel();
+
+  const ids = Object.keys(activeJobs);
+  const allTerminal = ids.length > 0 && ids.every((id) => {
+    const s = activeJobs[id].status;
+    return s === 'done' || s === 'failed' || s === 'cancelled';
+  });
+  if (allTerminal) {
+    clearInterval(progressPollInterval);
+    progressPollInterval = null;
+    setTimeout(() => {
+      document.getElementById('sur3aa-progress-panel')?.remove();
+      for (const id in activeJobs) delete activeJobs[id];
+    }, 5000);
+  }
+}
+
 async function triggerDownload(format) {
   // Refuse to start a second download while one is still running
   if (downloadInProgress) {
@@ -318,6 +550,15 @@ async function triggerDownload(format) {
     if (res.ok) {
       const { jobId } = await res.json();
       showStatus('⏳ Downloading...', 'pending');
+
+      // Seed and show the injected progress panel for this job
+      activeJobs[jobId] = { jobId, status: 'pending', percent: 0, speed: null, eta: null, url: window.location.href };
+      ensureProgressPanel();
+      renderProgressPanel();
+      if (!progressPollInterval) {
+        progressPollInterval = setInterval(pollProgressPanel, 2000);
+      }
+
       pollStatus(jobId, endDownload);
     } else {
       showStatus('✗ Server error', 'failed');
@@ -376,5 +617,11 @@ window.addEventListener('yt-navigate-finish', function () {
     // Drop cached formats so the next video fetches its own
     cachedFormats = null;
     formatsLoading = false;
+    // Tear down the progress panel and its poll loop, but keep activeJobs
+    // in memory so a return navigation can re-render if needed
+    clearInterval(progressPollInterval);
+    progressPollInterval = null;
+    const panel = document.getElementById('sur3aa-progress-panel');
+    if (panel) panel.remove();
   }
 });

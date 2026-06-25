@@ -1,6 +1,7 @@
 const DOWNLOAD_ENDPOINT = 'http://localhost:3333/download';
 const STATUS_ENDPOINT = 'http://localhost:3333/download/status';
 const FORMATS_ENDPOINT = 'http://localhost:3333/download/formats';
+const PICK_FOLDER_ENDPOINT = 'http://localhost:3333/download/pick-folder';
 
 // Guards against firing a second download while one is already running
 let downloadInProgress = false;
@@ -124,9 +125,32 @@ function showFormats(contentDiv, formats) {
       btn.style.borderColor = '#CC0000';
       btn.style.color = '#FF4444';
     }
-    btn.addEventListener('click', () => {
-      triggerDownload(format);
+    btn.addEventListener('click', async () => {
       document.getElementById('sur3aa-panel')?.remove();
+
+      // Disable the button while the native picker is open so a second
+      // download can't be started at the same time
+      const btn = document.getElementById('sur3aa-btn');
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.45';
+        btn.style.cursor = 'not-allowed';
+      }
+
+      const outputPath = await pickFolder();
+
+      // User cancelled the picker (or it failed) — restore the button, no download
+      if (outputPath === null) {
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+        }
+        console.log('[Sur3aa] folder picker cancelled');
+        return;
+      }
+
+      triggerDownload(format, outputPath);
     });
     contentDiv.appendChild(btn);
   });
@@ -513,7 +537,22 @@ async function pollProgressPanel() {
   }
 }
 
-async function triggerDownload(format) {
+// Asks the server to open a native folder picker. Returns the chosen path,
+// or null if the user cancelled or the server couldn't be reached.
+async function pickFolder() {
+  try {
+    const res = await fetch(PICK_FOLDER_ENDPOINT);
+    if (res.status === 204) return null;
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.path || null;
+  } catch {
+    console.log('[Sur3aa] could not reach server for folder picker');
+    return null;
+  }
+}
+
+async function triggerDownload(format, outputPath = null) {
   // Refuse to start a second download while one is still running
   if (downloadInProgress) {
     console.log('[Sur3aa] download already in progress');
@@ -545,7 +584,7 @@ async function triggerDownload(format) {
     const res = await fetch(DOWNLOAD_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, format }),
+      body: JSON.stringify({ url, format, outputPath }),
     });
     if (res.ok) {
       const { jobId } = await res.json();

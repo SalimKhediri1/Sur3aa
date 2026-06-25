@@ -115,8 +115,40 @@ router.delete('/:jobId', (req, res) => {
   res.json({ status: 'cancelled' });
 });
 
+// Opens a native folder picker via zenity and returns the chosen path
+router.get('/pick-folder', async (req, res) => {
+  const { spawn } = require('child_process');
+  const zenity = spawn('zenity', ['--file-selection', '--directory', '--title=Sur3aa — Choose download folder']);
+
+  let selectedPath = '';
+  let stderrOutput = '';
+
+  zenity.stdout.on('data', (data) => {
+    selectedPath += data.toString().trim();
+  });
+
+  zenity.stderr.on('data', (data) => {
+    stderrOutput += data.toString();
+  });
+
+  zenity.on('close', (code) => {
+    if (code === 0 && selectedPath) {
+      return res.json({ path: selectedPath });
+    }
+    if (code === 1) {
+      return res.status(204).end();
+    }
+    return res.status(500).json({ error: 'zenity failed', detail: stderrOutput });
+  });
+
+  zenity.on('error', (err) => {
+    return res.status(500).json({ error: 'zenity not found', detail: err.message });
+  });
+});
+
 router.post('/', (req, res) => {
   const { url, format } = req.body;
+  const outputPath = req.body.outputPath || null;
 
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
@@ -139,7 +171,9 @@ router.post('/', (req, res) => {
   // Respond immediately — yt-dlp runs in the background
   res.json({ jobId, status: 'pending' });
 
-  const outputTemplate = config.downloadPath + '/%(title)s.%(ext)s';
+  // Use the user-picked folder when provided, otherwise the configured default
+  const downloadDir = outputPath || config.downloadPath;
+  const outputTemplate = downloadDir + '/%(title)s.%(ext)s';
 
   let args;
   if (format && format.type === 'audio') {

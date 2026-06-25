@@ -1,4 +1,5 @@
 const DOWNLOAD_ENDPOINT = 'http://localhost:3333/download';
+const STATUS_ENDPOINT = 'http://localhost:3333/download/status';
 
 // Static format list — yt-dlp resolves the best match at download time
 const STATIC_FORMATS = [
@@ -73,6 +74,67 @@ function showFormats(contentDiv, formats) {
   });
 }
 
+function showStatus(message, type) {
+  let el = document.getElementById('sur3aa-status');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sur3aa-status';
+    el.style.fontSize = '12px';
+    el.style.marginLeft = '8px';
+    el.style.fontFamily = 'sans-serif';
+    // Insert immediately after the Sur3aa button
+    const btn = document.getElementById('sur3aa-btn');
+    if (btn && btn.parentNode) {
+      btn.parentNode.insertBefore(el, btn.nextSibling);
+    }
+  }
+  el.textContent = message;
+  el.style.color = type === 'done' ? '#00cc66' : type === 'failed' ? '#ff6b6b' : '#aaaaaa';
+}
+
+function clearStatus() {
+  document.getElementById('sur3aa-status')?.remove();
+}
+
+async function pollStatus(jobId) {
+  let polls = 0;
+  const MAX_POLLS = 60;
+
+  async function tick() {
+    if (polls >= MAX_POLLS) {
+      showStatus('✗ Timed out', 'failed');
+      return;
+    }
+    polls++;
+
+    let data;
+    try {
+      const res = await fetch(STATUS_ENDPOINT + '/' + jobId);
+      if (!res.ok) {
+        showStatus('✗ Could not reach server', 'failed');
+        return;
+      }
+      data = await res.json();
+    } catch {
+      showStatus('✗ Could not reach server', 'failed');
+      return;
+    }
+
+    if (data.status === 'pending') {
+      showStatus('⏳ Downloading...', 'pending');
+      setTimeout(tick, 2000);
+    } else if (data.status === 'done') {
+      showStatus('✓ Done', 'done');
+      setTimeout(clearStatus, 5000);
+    } else if (data.status === 'failed') {
+      showStatus('✗ Failed', 'failed');
+      setTimeout(clearStatus, 5000);
+    }
+  }
+
+  tick();
+}
+
 function injectButton() {
   if (document.getElementById('sur3aa-btn')) return;
 
@@ -90,16 +152,13 @@ function injectButton() {
   btn.style.fontWeight = 'bold';
 
   btn.addEventListener('click', () => {
-    // Toggle: clicking again closes the panel
     const existing = document.getElementById('sur3aa-panel');
     if (existing) {
       existing.remove();
       return;
     }
-
     const panel = createPanel();
     document.body.appendChild(panel);
-    // Show formats immediately — no network call needed
     showFormats(document.getElementById('sur3aa-panel-content'), STATIC_FORMATS);
   });
 
@@ -121,12 +180,14 @@ async function triggerDownload(format) {
       body: JSON.stringify({ url, format }),
     });
     if (res.ok) {
-      console.log('[Sur3aa] download started');
+      const { jobId } = await res.json();
+      showStatus('⏳ Downloading...', 'pending');
+      pollStatus(jobId);
     } else {
-      console.log('[Sur3aa] server error:', res.status);
+      showStatus('✗ Server error', 'failed');
     }
   } catch {
-    console.log('[Sur3aa] could not reach server — is it running?');
+    showStatus('✗ Could not reach server', 'failed');
   }
 }
 
@@ -160,5 +221,6 @@ window.addEventListener('yt-navigate-finish', function () {
   } else {
     document.getElementById('sur3aa-btn')?.remove();
     document.getElementById('sur3aa-panel')?.remove();
+    clearStatus();
   }
 });

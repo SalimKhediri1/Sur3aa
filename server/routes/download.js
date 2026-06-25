@@ -1,8 +1,12 @@
 const { Router } = require('express');
 const { spawn, execFile } = require('child_process');
+const { randomUUID } = require('crypto');
 const config = require('../config');
 
 const router = Router();
+
+// In-memory job tracker — resets on server restart
+const jobs = {};
 
 router.get('/formats', (req, res) => {
   const { url } = req.query;
@@ -62,12 +66,26 @@ router.get('/formats', (req, res) => {
   }
 });
 
+router.get('/status/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  if (!jobs[jobId]) {
+    return res.status(404).json({ error: 'job not found' });
+  }
+  res.json({ status: jobs[jobId].status, error: jobs[jobId].error || null });
+});
+
 router.post('/', (req, res) => {
   const { url, format } = req.body;
 
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
   }
+
+  const jobId = randomUUID();
+  jobs[jobId] = { status: 'pending' };
+
+  // Respond immediately — yt-dlp runs in the background
+  res.json({ jobId, status: 'pending' });
 
   const outputTemplate = config.downloadPath + '/%(title)s.%(ext)s';
 
@@ -77,7 +95,6 @@ router.post('/', (req, res) => {
   } else if (format && format.type === 'video') {
     args = [url, '--no-playlist', '-f', format.format_id, '-o', outputTemplate];
   } else {
-    // Default: best merged mp4
     args = [
       url,
       '--no-playlist',
@@ -87,14 +104,21 @@ router.post('/', (req, res) => {
     ];
   }
 
-  try {
-    // Fire and forget — respond immediately, let yt-dlp run in the background
-    spawn('yt-dlp', args, { detached: true, stdio: 'ignore' }).unref();
-  } catch (err) {
-    return res.status(500).json({ error: 'Failed to start yt-dlp' });
-  }
+  let stderr = '';
+  const proc = spawn('yt-dlp', args);
+  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
-  res.json({ status: 'download started', url });
+  proc.on('close', (code) => {
+    if (code === 0) {
+      jobs[jobId].status = 'done';
+    } else {
+      jobs[jobId].status = 'failed';
+      const lines = stderr.trim().split('\n');
+      jobs[jobId].error = lines[lines.length - 1] || 'unknown error';
+    }
+    // Clean up after 5 minutes to prevent memory leaks
+    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+  });
 });
 
 module.exports = router;

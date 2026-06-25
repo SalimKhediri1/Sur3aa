@@ -206,7 +206,7 @@ function injectButton() {
   icon.style.fontSize = '14px';
   icon.setAttribute('aria-hidden', 'true');
   btn.appendChild(icon);
-  const label = document.createTextNode(' Sur3aa');
+  const label = document.createTextNode('Download');
   btn.appendChild(label);
 
   btn.addEventListener('click', () => {

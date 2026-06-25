@@ -8,6 +8,10 @@ const router = Router();
 // In-memory job tracker — resets on server restart
 const jobs = {};
 
+// Cap on simultaneous yt-dlp processes
+let activeDownloads = 0;
+const MAX_CONCURRENT = 3;
+
 router.get('/formats', (req, res) => {
   const { url } = req.query;
 
@@ -81,6 +85,17 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'url is required' });
   }
 
+  // Reject anything that isn't a recognizable YouTube watch URL
+  const youtubeUrlPattern = /^https?:\/\/(www\.)?(youtube\.com\/watch\?.*v=|youtu\.be\/).+/;
+  if (!youtubeUrlPattern.test(url)) {
+    return res.status(400).json({ error: 'invalid YouTube URL' });
+  }
+
+  if (activeDownloads >= MAX_CONCURRENT) {
+    return res.status(429).json({ error: 'too many concurrent downloads' });
+  }
+  activeDownloads++;
+
   const jobId = randomUUID();
   jobs[jobId] = { status: 'pending' };
 
@@ -104,18 +119,24 @@ router.post('/', (req, res) => {
     ];
   }
 
-  let stderr = '';
+  let stderrOutput = '';
   const proc = spawn('yt-dlp', args);
-  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  proc.stderr.on('data', (chunk) => { stderrOutput += chunk.toString(); });
 
   proc.on('close', (code) => {
     if (code === 0) {
       jobs[jobId].status = 'done';
     } else {
       jobs[jobId].status = 'failed';
-      const lines = stderr.trim().split('\n');
-      jobs[jobId].error = lines[lines.length - 1] || 'unknown error';
+      // Use the last non-empty stderr line as the error message
+      const lastMeaningfulLine = stderrOutput
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .pop() || 'unknown error';
+      jobs[jobId].error = lastMeaningfulLine;
     }
+    activeDownloads--;
     // Clean up after 5 minutes to prevent memory leaks
     setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
   });

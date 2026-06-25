@@ -1,6 +1,9 @@
 const DOWNLOAD_ENDPOINT = 'http://localhost:3333/download';
 const STATUS_ENDPOINT = 'http://localhost:3333/download/status';
 
+// Guards against firing a second download while one is already running
+let downloadInProgress = false;
+
 // Static format list — yt-dlp resolves the best match at download time
 const STATIC_FORMATS = [
   { format_id: 'bestvideo[height<=2160]+bestaudio/best', label: '4K (best available)', type: 'video' },
@@ -96,13 +99,15 @@ function clearStatus() {
   document.getElementById('sur3aa-status')?.remove();
 }
 
-async function pollStatus(jobId) {
+// onEnd is called on every terminal path so the caller can release its lock
+async function pollStatus(jobId, onEnd) {
   let polls = 0;
   const MAX_POLLS = 60;
 
   async function tick() {
     if (polls >= MAX_POLLS) {
       showStatus('✗ Timed out', 'failed');
+      onEnd();
       return;
     }
     polls++;
@@ -112,11 +117,13 @@ async function pollStatus(jobId) {
       const res = await fetch(STATUS_ENDPOINT + '/' + jobId);
       if (!res.ok) {
         showStatus('✗ Could not reach server', 'failed');
+        onEnd();
         return;
       }
       data = await res.json();
     } catch {
       showStatus('✗ Could not reach server', 'failed');
+      onEnd();
       return;
     }
 
@@ -125,9 +132,11 @@ async function pollStatus(jobId) {
       setTimeout(tick, 2000);
     } else if (data.status === 'done') {
       showStatus('✓ Done', 'done');
+      onEnd();
       setTimeout(clearStatus, 5000);
     } else if (data.status === 'failed') {
       showStatus('✗ Failed', 'failed');
+      onEnd();
       setTimeout(clearStatus, 5000);
     }
   }
@@ -171,6 +180,31 @@ function injectButton() {
 }
 
 async function triggerDownload(format) {
+  // Refuse to start a second download while one is still running
+  if (downloadInProgress) {
+    console.log('[Sur3aa] download already in progress');
+    return;
+  }
+  downloadInProgress = true;
+
+  // Disable the button while the download runs
+  const btn = document.getElementById('sur3aa-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+  }
+
+  // Release the lock and re-enable the button — runs on every terminal path
+  function endDownload() {
+    downloadInProgress = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+    }
+  }
+
   const url = window.location.href;
   console.log('[Sur3aa] sending download request for:', url);
   try {
@@ -182,12 +216,14 @@ async function triggerDownload(format) {
     if (res.ok) {
       const { jobId } = await res.json();
       showStatus('⏳ Downloading...', 'pending');
-      pollStatus(jobId);
+      pollStatus(jobId, endDownload);
     } else {
       showStatus('✗ Server error', 'failed');
+      endDownload();
     }
   } catch {
     showStatus('✗ Could not reach server', 'failed');
+    endDownload();
   }
 }
 
@@ -197,7 +233,15 @@ function onVideoPage() {
   injectButton();
 
   // YouTube renders lazily — retry injection on DOM mutations until it succeeds
+  let attempts = 0;
   const observer = new MutationObserver(function () {
+    attempts++;
+    // Give up after 50 mutations so we don't observe forever on non-video pages
+    if (attempts > 50) {
+      observer.disconnect();
+      console.log('[Sur3aa] gave up waiting for injection target');
+      return;
+    }
     if (!document.getElementById('sur3aa-btn')) {
       const target = document.querySelector('#above-the-fold #top-row');
       if (target) injectButton();
@@ -222,5 +266,7 @@ window.addEventListener('yt-navigate-finish', function () {
     document.getElementById('sur3aa-btn')?.remove();
     document.getElementById('sur3aa-panel')?.remove();
     clearStatus();
+    // Reset the lock so a mid-download navigation doesn't leave a stuck state
+    downloadInProgress = false;
   }
 });

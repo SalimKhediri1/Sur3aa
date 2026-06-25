@@ -50,4 +50,4 @@ sur3aa/
 - CORS must be enabled on the server for extension origins
 
 ## Current phase
-Phase 6 — Download status feedback (in progress)
+Phase 7 — Complete

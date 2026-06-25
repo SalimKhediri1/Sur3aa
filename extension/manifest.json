@@ -2,12 +2,17 @@
   "manifest_version": 3,
   "name": "Sur3aa",
   "version": "0.1.0",
+  "description": "YouTube download manager",
   "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["https://www.youtube.com/*"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://localhost:3333/*"
+  ],
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "js": ["content_script.js"]
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
     }
   ],
   "background": {

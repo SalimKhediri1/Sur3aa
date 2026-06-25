@@ -1,8 +1,13 @@
 const DOWNLOAD_ENDPOINT = 'http://localhost:3333/download';
 const STATUS_ENDPOINT = 'http://localhost:3333/download/status';
+const FORMATS_ENDPOINT = 'http://localhost:3333/download/formats';
 
 // Guards against firing a second download while one is already running
 let downloadInProgress = false;
+
+// Per-page format cache so the panel can open instantly with real formats
+let cachedFormats = null;
+let formatsLoading = false;
 
 // Static format list — yt-dlp resolves the best match at download time
 const STATIC_FORMATS = [
@@ -13,6 +18,39 @@ const STATIC_FORMATS = [
   { format_id: 'bestvideo[height<=360]+bestaudio/best',  label: '360p',  type: 'video' },
   { format_id: 'bestaudio/best', label: 'Audio only (mp3)', type: 'audio' },
 ];
+
+// Ask the server for the real formats available for this specific video.
+// Returns an array of format objects, or null if the server can't be reached.
+async function fetchFormats(url) {
+  try {
+    const res = await fetch(FORMATS_ENDPOINT + '?url=' + encodeURIComponent(url));
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.formats || null;
+  } catch {
+    return null;
+  }
+}
+
+// Placeholder shown in the panel while formats are still being fetched
+function showLoadingState(contentDiv) {
+  contentDiv.innerHTML = '';
+  const msg = document.createElement('div');
+  msg.textContent = 'Loading formats…';
+  msg.style.color = '#888';
+  msg.style.fontSize = '13px';
+  msg.style.padding = '8px 4px';
+  contentDiv.appendChild(msg);
+}
+
+// Fetch formats ahead of the user clicking, so the panel opens instantly
+async function prefetchFormats(url) {
+  if (formatsLoading) return;
+  formatsLoading = true;
+  const formats = await fetchFormats(url);
+  if (formats) cachedFormats = formats;
+  formatsLoading = false;
+}
 
 function createPanel() {
   const panel = document.createElement('div');
@@ -217,7 +255,22 @@ function injectButton() {
     }
     const panel = createPanel();
     document.body.appendChild(panel);
-    showFormats(document.getElementById('sur3aa-panel-content'), STATIC_FORMATS);
+    const contentDiv = document.getElementById('sur3aa-panel-content');
+
+    // Use prefetched formats if ready; otherwise fetch now, falling back to static
+    if (cachedFormats) {
+      showFormats(contentDiv, cachedFormats);
+    } else {
+      showLoadingState(contentDiv);
+      fetchFormats(window.location.href).then((formats) => {
+        if (formats) {
+          cachedFormats = formats;
+          showFormats(contentDiv, formats);
+        } else {
+          showFormats(contentDiv, STATIC_FORMATS);
+        }
+      });
+    }
   });
 
   const target = document.querySelector('#above-the-fold #top-row');
@@ -278,6 +331,7 @@ async function triggerDownload(format) {
 
 function onVideoPage() {
   console.log('[Sur3aa] video page detected:', window.location.href);
+  prefetchFormats(window.location.href);
 
   injectButton();
 
@@ -317,5 +371,8 @@ window.addEventListener('yt-navigate-finish', function () {
     clearStatus();
     // Reset the lock so a mid-download navigation doesn't leave a stuck state
     downloadInProgress = false;
+    // Drop cached formats so the next video fetches its own
+    cachedFormats = null;
+    formatsLoading = false;
   }
 });

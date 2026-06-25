@@ -75,7 +75,41 @@ router.get('/status/:jobId', (req, res) => {
   if (!jobs[jobId]) {
     return res.status(404).json({ error: 'job not found' });
   }
-  res.json({ status: jobs[jobId].status, error: jobs[jobId].error || null });
+  res.json({
+    status: jobs[jobId].status,
+    percent: jobs[jobId].percent || 0,
+    size: jobs[jobId].size || null,
+    speed: jobs[jobId].speed || null,
+    eta: jobs[jobId].eta || null,
+    error: jobs[jobId].error || null,
+  });
+});
+
+// Returns all tracked jobs so the popup can render a live download list
+router.get('/jobs', (req, res) => {
+  const jobList = Object.entries(jobs).map(([id, job]) => ({
+    jobId: id,
+    status: job.status,
+    percent: job.percent || 0,
+    size: job.size || null,
+    speed: job.speed || null,
+    eta: job.eta || null,
+    url: job.url || null,
+    error: job.error || null,
+  }));
+  res.json({ jobs: jobList });
+});
+
+// Cancels an in-progress download by killing its yt-dlp process
+router.delete('/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  if (!jobs[jobId]) return res.status(404).json({ error: 'job not found' });
+  if (jobs[jobId].process) {
+    jobs[jobId].process.kill();
+    jobs[jobId].status = 'cancelled';
+    delete jobs[jobId].process;
+  }
+  res.json({ status: 'cancelled' });
 });
 
 router.post('/', (req, res) => {
@@ -97,7 +131,7 @@ router.post('/', (req, res) => {
   activeDownloads++;
 
   const jobId = randomUUID();
-  jobs[jobId] = { status: 'pending' };
+  jobs[jobId] = { status: 'pending', percent: 0, size: null, speed: null, eta: null, url };
 
   // Respond immediately — yt-dlp runs in the background
   res.json({ jobId, status: 'pending' });
@@ -121,11 +155,36 @@ router.post('/', (req, res) => {
 
   let stderrOutput = '';
   const proc = spawn('yt-dlp', args);
+  // Keep a handle on the process so the DELETE route can cancel it
+  jobs[jobId].process = proc;
   proc.stderr.on('data', (chunk) => { stderrOutput += chunk.toString(); });
 
+  // Parse yt-dlp's [download] progress lines off stdout into the job record
+  proc.stdout.on('data', (data) => {
+    const lines = data.toString().split('\n');
+    lines.forEach((line) => {
+      // `~?` also matches yt-dlp's estimated-size lines (e.g. "of ~12.00MiB")
+      const match = line.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);
+      if (match) {
+        jobs[jobId].percent = parseFloat(match[1]);
+        jobs[jobId].size = match[2];
+        jobs[jobId].speed = match[3];
+        jobs[jobId].eta = match[4];
+      }
+    });
+  });
+
   proc.on('close', (code) => {
+    delete jobs[jobId].process;
+    // A killed (cancelled) process stays cancelled — don't overwrite its status
+    if (jobs[jobId].status === 'cancelled') {
+      activeDownloads--;
+      setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+      return;
+    }
     if (code === 0) {
       jobs[jobId].status = 'done';
+      jobs[jobId].percent = 100;
     } else {
       jobs[jobId].status = 'failed';
       // Use the last non-empty stderr line as the error message

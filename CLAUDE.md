@@ -50,4 +50,4 @@ sur3aa/
 - CORS must be enabled on the server for extension origins
 
 ## Current phase
-Phase 1 — Scaffold done | Phase 2 — Node.js server (in progress)
+Phase 2 — Server + socket activation done | Phase 3 — Browser extension (in progress)

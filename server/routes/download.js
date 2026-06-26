@@ -193,10 +193,9 @@ router.post('/', (req, res) => {
     ];
   }
 
-  // Impersonate YouTube's Safari web client — it returns un-throttled stream
-  // URLs, avoiding the ~90 KiB/s cap on the default client. If YouTube changes
-  // its throttling and downloads slow down or fail, revisit/remove this.
-  args.push('--extractor-args', 'youtube:player_client=web_safari');
+  // NOTE: the web_safari client impersonation was removed — YouTube changed
+  // and it now returns "No video formats found!", failing every download.
+  // The default client works again; revisit only if throttling reappears.
 
   // Trim to the requested segment only when both ends are provided
   if (startTime && endTime) {

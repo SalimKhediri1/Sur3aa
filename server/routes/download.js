@@ -149,6 +149,9 @@ router.get('/pick-folder', async (req, res) => {
 router.post('/', (req, res) => {
   const { url, format } = req.body;
   const outputPath = req.body.outputPath || null;
+  // Optional segment range — both must be present to trim the download
+  const startTime = (req.body.startTime || '').trim();
+  const endTime = (req.body.endTime || '').trim();
 
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
@@ -188,6 +191,16 @@ router.post('/', (req, res) => {
       '-o', outputTemplate,
       '--merge-output-format', 'mp4',
     ];
+  }
+
+  // Impersonate YouTube's Safari web client — it returns un-throttled stream
+  // URLs, avoiding the ~90 KiB/s cap on the default client. If YouTube changes
+  // its throttling and downloads slow down or fail, revisit/remove this.
+  args.push('--extractor-args', 'youtube:player_client=web_safari');
+
+  // Trim to the requested segment only when both ends are provided
+  if (startTime && endTime) {
+    args.push('--download-sections', `*${startTime}-${endTime}`);
   }
 
   let stderrOutput = '';

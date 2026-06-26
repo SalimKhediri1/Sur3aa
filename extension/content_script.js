@@ -103,8 +103,45 @@ function createPanel() {
   return panel;
 }
 
+// Builds a labeled time input (HH:MM:SS) and appends it to the panel
+function createTimeField(labelText) {
+  const wrapper = document.createElement('div');
+  wrapper.style.marginBottom = '6px';
+
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  label.style.display = 'block';
+  label.style.color = '#aaa';
+  label.style.fontSize = '11px';
+  label.style.marginBottom = '3px';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '00:00:00';
+  input.style.width = '100%';
+  input.style.boxSizing = 'border-box';
+  input.style.background = 'rgba(255,255,255,0.06)';
+  input.style.border = '1px solid rgba(204,0,0,0.35)';
+  input.style.borderRadius = '6px';
+  input.style.color = '#FFAAAA';
+  input.style.fontSize = '13px';
+  input.style.padding = '6px 8px';
+  input.style.fontFamily = 'sans-serif';
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(input);
+  return { wrapper, input };
+}
+
 function showFormats(contentDiv, formats) {
   contentDiv.innerHTML = '';
+
+  // Optional segment range — left empty downloads the full video as before
+  const startField = createTimeField('Start time');
+  const endField = createTimeField('End time');
+  contentDiv.appendChild(startField.wrapper);
+  contentDiv.appendChild(endField.wrapper);
+
   formats.forEach((format) => {
     const btn = document.createElement('button');
     btn.textContent = format.label;
@@ -126,6 +163,10 @@ function showFormats(contentDiv, formats) {
       btn.style.color = '#FF4444';
     }
     btn.addEventListener('click', async () => {
+      // Capture the segment times before the panel (and its inputs) are removed
+      const startTime = startField.input.value.trim();
+      const endTime = endField.input.value.trim();
+
       document.getElementById('sur3aa-panel')?.remove();
 
       // Disable the button while the native picker is open so a second
@@ -150,7 +191,7 @@ function showFormats(contentDiv, formats) {
         return;
       }
 
-      triggerDownload(format, outputPath);
+      triggerDownload(format, outputPath, startTime, endTime);
     });
     contentDiv.appendChild(btn);
   });
@@ -234,6 +275,10 @@ async function pollStatus(jobId, onEnd) {
       showStatus('✗ Failed', 'failed');
       onEnd();
       setTimeout(clearStatus, 5000);
+    } else if (data.status === 'cancelled') {
+      // User cancelled — remove the inline status badge right away
+      clearStatus();
+      onEnd();
     }
   }
 
@@ -552,7 +597,7 @@ async function pickFolder() {
   }
 }
 
-async function triggerDownload(format, outputPath = null) {
+async function triggerDownload(format, outputPath = null, startTime = '', endTime = '') {
   // Refuse to start a second download while one is still running
   if (downloadInProgress) {
     console.log('[Sur3aa] download already in progress');
@@ -584,7 +629,7 @@ async function triggerDownload(format, outputPath = null) {
     const res = await fetch(DOWNLOAD_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, format, outputPath }),
+      body: JSON.stringify({ url, format, outputPath, startTime, endTime }),
     });
     if (res.ok) {
       const { jobId } = await res.json();

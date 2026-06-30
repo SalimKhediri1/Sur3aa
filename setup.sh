@@ -98,12 +98,43 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 ( cd "$SCRIPT_DIR/server" && npm install )
 
+# --- Install systemd user service (Linux only) ---
+if [ "$PLATFORM" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+  echo "==> Installing Sur3aa as a background service..."
+
+  NODE_BIN="$(command -v node)"
+  SERVICE_DIR="$HOME/.config/systemd/user"
+  mkdir -p "$SERVICE_DIR"
+
+  cat > "$SERVICE_DIR/sur3aa.service" << EOF
+[Unit]
+Description=Sur3aa local download server
+After=network.target
+
+[Service]
+ExecStart=$NODE_BIN $SCRIPT_DIR/server/index.js
+Restart=on-failure
+RestartSec=5
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable sur3aa.service
+  # Restart instead of start so re-running setup picks up any changes
+  systemctl --user restart sur3aa.service
+  echo "==> Sur3aa server is running in the background and will start automatically on login"
+else
+  echo "==> Skipping service install (not Linux/systemd). Start the server manually with:"
+  echo "    node server/index.js"
+fi
+
 # --- Done ---
 echo ""
 echo "============================================"
 echo "  Sur3aa setup complete!"
 echo "============================================"
-echo "Start the server with:"
-echo "    node server/index.js"
-echo ""
-echo "Then load the extension in your browser (see the README)."
+echo "Load the extension in your browser (see the README)."
+echo "The server runs automatically in the background — no need to start it manually."

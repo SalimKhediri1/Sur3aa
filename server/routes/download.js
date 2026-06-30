@@ -197,6 +197,9 @@ router.post('/', (req, res) => {
   // and it now returns "No video formats found!", failing every download.
   // The default client works again; revisit only if throttling reappears.
 
+  // Download multiple fragments in parallel for faster speeds
+  args.push('--concurrent-fragments', '4');
+
   // Trim to the requested segment only when both ends are provided
   if (startTime && endTime) {
     args.push('--download-sections', `*${startTime}-${endTime}`);

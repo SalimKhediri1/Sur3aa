@@ -9,6 +9,8 @@ let downloadInProgress = false;
 // Per-page format cache so the panel can open instantly with real formats
 let cachedFormats = null;
 let formatsLoading = false;
+// Tracks which URL the in-flight prefetch is for — used to discard stale results
+let prefetchingForUrl = null;
 
 // Single source of truth for the injected progress panel: jobId -> job data.
 // progressPollInterval holds the poll loop so it can be cleared when idle.
@@ -49,11 +51,15 @@ function showLoadingState(contentDiv) {
   contentDiv.appendChild(msg);
 }
 
-// Fetch formats ahead of the user clicking, so the panel opens instantly
+// Fetch formats ahead of the user clicking, so the panel opens instantly.
+// Stores the URL being fetched so results from a previous video are discarded
+// if the user navigated away before the fetch finished.
 async function prefetchFormats(url) {
-  if (formatsLoading) return;
+  prefetchingForUrl = url;
   formatsLoading = true;
   const formats = await fetchFormats(url);
+  // Navigation happened while this was in flight — throw the result away
+  if (prefetchingForUrl !== url) return;
   if (formats) cachedFormats = formats;
   formatsLoading = false;
 }
@@ -103,44 +109,153 @@ function createPanel() {
   return panel;
 }
 
-// Builds a labeled time input (HH:MM:SS) and appends it to the panel
-function createTimeField(labelText) {
+// Convert seconds to HH:MM:SS string
+function secondsToTimecode(s) {
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return [h, m, sec].map(v => String(v).padStart(2, '0')).join(':');
+}
+
+// Dual-handle range slider for choosing a video segment.
+// Returns { wrapper, getStartTime(), getEndTime() }.
+// getStartTime/getEndTime return an HH:MM:SS string, or '' when at the boundary
+// (meaning "no trim" — download the full video).
+function createRangeSlider(duration) {
+  // Inject thumb styles once per page so YouTube's global CSS doesn't clobber them
+  if (!document.getElementById('sur3aa-slider-styles')) {
+    const style = document.createElement('style');
+    style.id = 'sur3aa-slider-styles';
+    style.textContent = [
+      '.sur3aa-range{-webkit-appearance:none;appearance:none;position:absolute;',
+      'left:0;width:100%;height:4px;background:transparent;pointer-events:none;outline:none;}',
+      '.sur3aa-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;',
+      'width:14px;height:14px;background:#FF4444;border-radius:50%;',
+      'cursor:pointer;pointer-events:auto;border:none;}',
+      '.sur3aa-range::-moz-range-thumb{width:14px;height:14px;background:#FF4444;',
+      'border-radius:50%;cursor:pointer;pointer-events:auto;border:none;box-sizing:border-box;}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  const max = Math.floor(duration);
+
   const wrapper = document.createElement('div');
-  wrapper.style.marginBottom = '6px';
+  wrapper.style.marginBottom = '10px';
 
-  const label = document.createElement('label');
-  label.textContent = labelText;
-  label.style.display = 'block';
-  label.style.color = '#aaa';
-  label.style.fontSize = '11px';
-  label.style.marginBottom = '3px';
+  // Time labels — start on the left, end on the right
+  const timeRow = document.createElement('div');
+  timeRow.style.display = 'flex';
+  timeRow.style.justifyContent = 'space-between';
+  timeRow.style.fontSize = '11px';
+  timeRow.style.color = '#aaa';
+  timeRow.style.marginBottom = '6px';
 
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.placeholder = '00:00:00';
-  input.style.width = '100%';
-  input.style.boxSizing = 'border-box';
-  input.style.background = 'rgba(255,255,255,0.06)';
-  input.style.border = '1px solid rgba(204,0,0,0.35)';
-  input.style.borderRadius = '6px';
-  input.style.color = '#FFAAAA';
-  input.style.fontSize = '13px';
-  input.style.padding = '6px 8px';
-  input.style.fontFamily = 'sans-serif';
+  const startLabel = document.createElement('span');
+  startLabel.textContent = '00:00:00';
+  const endLabel = document.createElement('span');
+  endLabel.textContent = secondsToTimecode(max);
 
-  wrapper.appendChild(label);
-  wrapper.appendChild(input);
-  return { wrapper, input };
+  timeRow.appendChild(startLabel);
+  timeRow.appendChild(endLabel);
+
+  // Track container — must be relative so the absolute inputs stack inside it
+  const trackContainer = document.createElement('div');
+  trackContainer.style.position = 'relative';
+  trackContainer.style.height = '20px';
+  trackContainer.style.display = 'flex';
+  trackContainer.style.alignItems = 'center';
+
+  const track = document.createElement('div');
+  track.style.position = 'absolute';
+  track.style.left = '0';
+  track.style.right = '0';
+  track.style.height = '4px';
+  track.style.background = 'rgba(255,255,255,0.1)';
+  track.style.borderRadius = '2px';
+
+  // Red fill between the two handles
+  const fill = document.createElement('div');
+  fill.style.position = 'absolute';
+  fill.style.height = '4px';
+  fill.style.background = '#CC0000';
+  fill.style.borderRadius = '2px';
+
+  const startInput = document.createElement('input');
+  startInput.type = 'range';
+  startInput.className = 'sur3aa-range';
+  startInput.min = 0;
+  startInput.max = max;
+  startInput.value = 0;
+
+  const endInput = document.createElement('input');
+  endInput.type = 'range';
+  endInput.className = 'sur3aa-range';
+  endInput.min = 0;
+  endInput.max = max;
+  endInput.value = max;
+
+  function updateFill() {
+    const s = parseInt(startInput.value);
+    const e = parseInt(endInput.value);
+    fill.style.left = (s / max * 100) + '%';
+    fill.style.width = ((e - s) / max * 100) + '%';
+    startLabel.textContent = secondsToTimecode(s);
+    endLabel.textContent = secondsToTimecode(e);
+    // Keep the rightmost handle on top so it stays reachable
+    startInput.style.zIndex = s >= e ? '3' : '2';
+    endInput.style.zIndex = e >= s ? '3' : '2';
+  }
+
+  startInput.addEventListener('input', () => {
+    if (parseInt(startInput.value) >= parseInt(endInput.value)) {
+      startInput.value = Math.max(0, parseInt(endInput.value) - 1);
+    }
+    updateFill();
+  });
+
+  endInput.addEventListener('input', () => {
+    if (parseInt(endInput.value) <= parseInt(startInput.value)) {
+      endInput.value = Math.min(max, parseInt(startInput.value) + 1);
+    }
+    updateFill();
+  });
+
+  updateFill();
+
+  trackContainer.appendChild(track);
+  trackContainer.appendChild(fill);
+  trackContainer.appendChild(startInput);
+  trackContainer.appendChild(endInput);
+
+  wrapper.appendChild(timeRow);
+  wrapper.appendChild(trackContainer);
+
+  return {
+    wrapper,
+    // Return '' when at the natural boundary — the server skips --download-sections
+    getStartTime: () => {
+      const s = parseInt(startInput.value);
+      return s > 0 ? secondsToTimecode(s) : '';
+    },
+    getEndTime: () => {
+      const e = parseInt(endInput.value);
+      return e < max ? secondsToTimecode(e) : '';
+    },
+  };
 }
 
 function showFormats(contentDiv, formats) {
   contentDiv.innerHTML = '';
 
-  // Optional segment range — left empty downloads the full video as before
-  const startField = createTimeField('Start time');
-  const endField = createTimeField('End time');
-  contentDiv.appendChild(startField.wrapper);
-  contentDiv.appendChild(endField.wrapper);
+  // Try to read the video duration so the slider knows its range
+  const video = document.querySelector('video');
+  const duration = video && isFinite(video.duration) && video.duration > 0 ? video.duration : null;
+
+  // Slider only shown when we know the video length
+  const slider = duration ? createRangeSlider(duration) : null;
+  if (slider) contentDiv.appendChild(slider.wrapper);
 
   formats.forEach((format) => {
     const btn = document.createElement('button');
@@ -157,15 +272,15 @@ function showFormats(contentDiv, formats) {
     btn.style.cursor = 'pointer';
     btn.style.textAlign = 'left';
     btn.style.fontFamily = 'sans-serif';
-    // The audio-only option gets a brighter purple accent to stand out
+    // The audio-only option gets a brighter red accent to stand out
     if (format.type === 'audio') {
       btn.style.borderColor = '#CC0000';
       btn.style.color = '#FF4444';
     }
     btn.addEventListener('click', async () => {
-      // Capture the segment times before the panel (and its inputs) are removed
-      const startTime = startField.input.value.trim();
-      const endTime = endField.input.value.trim();
+      // Read slider values before the panel is removed
+      const startTime = slider ? slider.getStartTime() : '';
+      const endTime = slider ? slider.getEndTime() : '';
 
       document.getElementById('sur3aa-panel')?.remove();
 
@@ -180,14 +295,25 @@ function showFormats(contentDiv, formats) {
 
       const outputPath = await pickFolder();
 
-      // User cancelled the picker (or it failed) — restore the button, no download
+      // User cancelled the picker — restore the button silently
       if (outputPath === null) {
         if (btn) {
           btn.disabled = false;
           btn.style.opacity = '1';
           btn.style.cursor = 'pointer';
         }
-        console.log('[Sur3aa] folder picker cancelled');
+        return;
+      }
+
+      // Server unreachable or zenity failed — show a visible error
+      if (outputPath === false) {
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+        }
+        showStatus('✗ Server not running', 'failed');
+        setTimeout(clearStatus, 4000);
         return;
       }
 
@@ -582,18 +708,19 @@ async function pollProgressPanel() {
   }
 }
 
-// Asks the server to open a native folder picker. Returns the chosen path,
-// or null if the user cancelled or the server couldn't be reached.
+// Asks the server to open a native folder picker.
+// Returns the chosen path string on success, null if the user cancelled, or
+// false if the server could not be reached / zenity failed.
 async function pickFolder() {
   try {
     const res = await fetch(PICK_FOLDER_ENDPOINT);
-    if (res.status === 204) return null;
-    if (!res.ok) return null;
+    if (res.status === 204) return null;  // user cancelled in zenity
+    if (!res.ok) return false;            // zenity or server error
     const data = await res.json();
-    return data.path || null;
+    return data.path || false;
   } catch {
-    console.log('[Sur3aa] could not reach server for folder picker');
-    return null;
+    // network error — server is probably not running
+    return false;
   }
 }
 
@@ -656,8 +783,10 @@ async function triggerDownload(format, outputPath = null, startTime = '', endTim
 
 function onVideoPage() {
   console.log('[Sur3aa] video page detected:', window.location.href);
-  // Clear any prior video's formats so a new page never shows stale options
+  // Invalidate any previous video's cache and cancel the in-flight prefetch
   cachedFormats = null;
+  formatsLoading = false;
+  prefetchingForUrl = null;
   prefetchFormats(window.location.href);
 
   injectButton();
@@ -698,9 +827,10 @@ window.addEventListener('yt-navigate-finish', function () {
     clearStatus();
     // Reset the lock so a mid-download navigation doesn't leave a stuck state
     downloadInProgress = false;
-    // Drop cached formats so the next video fetches its own
+    // Drop cached formats and cancel any in-flight prefetch
     cachedFormats = null;
     formatsLoading = false;
+    prefetchingForUrl = null;
     // Tear down the progress panel and its poll loop, but keep activeJobs
     // in memory so a return navigation can re-render if needed
     clearInterval(progressPollInterval);

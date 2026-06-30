@@ -215,15 +215,17 @@ router.post('/', (req, res) => {
   // and it now returns "No video formats found!", failing every download.
   // The default client works again; revisit only if throttling reappears.
 
-  // Download multiple fragments in parallel for faster speeds
-  args.push('--concurrent-fragments', '4');
+  const isSegment = startTime || endTime;
 
-  // Trim to segment if either handle was moved from its boundary.
-  // '' means "use the natural edge": 0 for start, inf for end.
-  if (startTime || endTime) {
+  if (isSegment) {
+    // --concurrent-fragments conflicts with --download-sections in yt-dlp;
+    // skip it for segment downloads so the slice actually works.
     const start = startTime || '0';
     const end   = endTime   || 'inf';
     args.push('--download-sections', `*${start}-${end}`);
+  } else {
+    // Full downloads use parallel fragments for speed
+    args.push('--concurrent-fragments', '4');
   }
 
   let stderrOutput = '';

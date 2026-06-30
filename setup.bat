@@ -1,8 +1,10 @@
 @echo off
 REM ============================================
 REM  Sur3aa setup script for Windows
-REM  Installs ffmpeg, yt-dlp, and server deps.
-REM  Double-click this file or run it from Command Prompt.
+REM  Installs ffmpeg, yt-dlp, and server deps,
+REM  then registers the server to start silently
+REM  at login, just like Linux does via systemd.
+REM  Double-click or run from Command Prompt.
 REM ============================================
 
 setlocal
@@ -47,14 +49,33 @@ if errorlevel 1 (
 )
 popd
 
+REM --- Register autostart via Windows Startup folder (no admin required) ---
+echo ==^> Registering Sur3aa to start automatically at login...
+set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+copy /y "%~dp0start-server-hidden.vbs" "%STARTUP%\Sur3aa.vbs" >nul
+if errorlevel 1 (
+  echo Warning: could not write to Startup folder. You can start the server manually with start-server.bat
+) else (
+  echo =^> Sur3aa will start silently in the background on every login.
+)
+
+REM --- Start the server right now without waiting for next login ---
+echo ==^> Starting Sur3aa server in the background...
+wscript.exe "%~dp0start-server-hidden.vbs"
+
 REM --- Done ---
 echo.
 echo ============================================
 echo   Sur3aa setup complete!
 echo ============================================
-echo Start the server with:
-echo     node server\index.js
+echo The server is running silently in the background.
+echo It will start automatically every time you log in.
 echo.
-echo Then load the extension in your browser (see the README).
+echo Load the extension in your browser ^(see the README^).
+echo.
+echo Useful commands:
+echo   stop-server.bat          - stop the background server
+echo   start-server.bat         - start it again ^(visible terminal, for debugging^)
+echo   start-server-hidden.vbs  - start it again silently
 
 endlocal

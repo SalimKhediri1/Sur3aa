@@ -5,7 +5,7 @@ const config = require('../config');
 
 const router = Router();
 
-// In-memory job tracker — resets on server restart
+// In-memory job tracker, resets on server restart
 const jobs = {};
 
 // Cap on simultaneous yt-dlp processes
@@ -34,7 +34,7 @@ router.get('/formats', (req, res) => {
 
       const formats = parsed.formats || [];
 
-      // YouTube serves video and audio as separate DASH streams — keep the
+      // YouTube serves video and audio as separate DASH streams; keep the
       // video-only streams (no merged audio) so we see every real resolution
       const videoStreams = formats.filter(f =>
         f.vcodec && f.vcodec !== 'none' &&
@@ -42,7 +42,7 @@ router.get('/formats', (req, res) => {
         f.height
       );
 
-      // Deduplicate by height — keep only the first entry per height value
+      // Deduplicate by height, keep only the first entry per height value
       const seen = new Set();
       const unique = videoStreams.filter(f => {
         if (seen.has(f.height)) return false;
@@ -56,7 +56,7 @@ router.get('/formats', (req, res) => {
       // Use yt-dlp selector syntax so it merges with the best audio at download
       const videoFormats = unique.map(f => ({
         format_id: `bestvideo[height<=${f.height}]+bestaudio/best`,
-        label: f.height >= 2160 ? `4K — video + audio` : `${f.height}p — video + audio`,
+        label: f.height >= 2160 ? `4K - video + audio` : `${f.height}p - video + audio`,
         type: 'video'
       }));
 
@@ -115,41 +115,59 @@ router.delete('/:jobId', (req, res) => {
   res.json({ status: 'cancelled' });
 });
 
-// Opens a native folder picker via zenity and returns the chosen path
+// Opens a native folder picker and returns the chosen path.
+// Uses PowerShell on Windows and zenity on Linux.
 router.get('/pick-folder', async (req, res) => {
   const { spawn } = require('child_process');
-  const zenity = spawn('zenity', ['--file-selection', '--directory', '--title=Sur3aa — Choose download folder']);
 
-  let selectedPath = '';
-  let stderrOutput = '';
+  if (process.platform === 'win32') {
+    const ps = spawn('powershell', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      '[System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms")|Out-Null;' +
+      '$f=New-Object System.Windows.Forms.FolderBrowserDialog;' +
+      '$f.Description="Sur3aa - Choose download folder";' +
+      'if($f.ShowDialog() -eq "OK"){$f.SelectedPath}else{""}',
+    ]);
 
-  zenity.stdout.on('data', (data) => {
-    selectedPath += data.toString().trim();
-  });
+    let selectedPath = '';
+    let stderrOutput = '';
 
-  zenity.stderr.on('data', (data) => {
-    stderrOutput += data.toString();
-  });
+    ps.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
+    ps.stderr.on('data', (data) => { stderrOutput += data.toString(); });
 
-  zenity.on('close', (code) => {
-    if (code === 0 && selectedPath) {
-      return res.json({ path: selectedPath });
-    }
-    if (code === 1) {
+    ps.on('close', () => {
+      if (selectedPath) return res.json({ path: selectedPath });
       return res.status(204).end();
-    }
-    return res.status(500).json({ error: 'zenity failed', detail: stderrOutput });
-  });
+    });
 
-  zenity.on('error', (err) => {
-    return res.status(500).json({ error: 'zenity not found', detail: err.message });
-  });
+    ps.on('error', (err) => {
+      return res.status(500).json({ error: 'powershell not found', detail: err.message });
+    });
+  } else {
+    const zenity = spawn('zenity', ['--file-selection', '--directory', '--title=Sur3aa - Choose download folder']);
+
+    let selectedPath = '';
+    let stderrOutput = '';
+
+    zenity.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
+    zenity.stderr.on('data', (data) => { stderrOutput += data.toString(); });
+
+    zenity.on('close', (code) => {
+      if (code === 0 && selectedPath) return res.json({ path: selectedPath });
+      if (code === 1) return res.status(204).end();
+      return res.status(500).json({ error: 'zenity failed', detail: stderrOutput });
+    });
+
+    zenity.on('error', (err) => {
+      return res.status(500).json({ error: 'zenity not found', detail: err.message });
+    });
+  }
 });
 
 router.post('/', (req, res) => {
   const { url, format } = req.body;
   const outputPath = req.body.outputPath || null;
-  // Optional segment range — both must be present to trim the download
+  // Optional segment range, requires both to be present to trim the download
   const startTime = (req.body.startTime || '').trim();
   const endTime = (req.body.endTime || '').trim();
 
@@ -171,7 +189,7 @@ router.post('/', (req, res) => {
   const jobId = randomUUID();
   jobs[jobId] = { status: 'pending', percent: 0, size: null, speed: null, eta: null, url };
 
-  // Respond immediately — yt-dlp runs in the background
+  // Respond immediately; yt-dlp runs in the background
   res.json({ jobId, status: 'pending' });
 
   // Use the user-picked folder when provided, otherwise the configured default
@@ -193,16 +211,19 @@ router.post('/', (req, res) => {
     ];
   }
 
-  // NOTE: the web_safari client impersonation was removed — YouTube changed
+  // NOTE: the web_safari client impersonation was removed. YouTube changed
   // and it now returns "No video formats found!", failing every download.
   // The default client works again; revisit only if throttling reappears.
 
   // Download multiple fragments in parallel for faster speeds
   args.push('--concurrent-fragments', '4');
 
-  // Trim to the requested segment only when both ends are provided
-  if (startTime && endTime) {
-    args.push('--download-sections', `*${startTime}-${endTime}`);
+  // Trim to segment if either handle was moved from its boundary.
+  // '' means "use the natural edge": 0 for start, inf for end.
+  if (startTime || endTime) {
+    const start = startTime || '0';
+    const end   = endTime   || 'inf';
+    args.push('--download-sections', `*${start}-${end}`);
   }
 
   let stderrOutput = '';
@@ -228,7 +249,7 @@ router.post('/', (req, res) => {
 
   proc.on('close', (code) => {
     delete jobs[jobId].process;
-    // A killed (cancelled) process stays cancelled — don't overwrite its status
+    // A killed (cancelled) process stays cancelled; don't overwrite its status
     if (jobs[jobId].status === 'cancelled') {
       activeDownloads--;
       setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);

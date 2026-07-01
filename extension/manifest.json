@@ -6,7 +6,7 @@
   "icons": {
     "48": "icons/icon48.png"
   },
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab"],
   "host_permissions": [
     "https://www.youtube.com/*",
     "http://localhost:3333/*"

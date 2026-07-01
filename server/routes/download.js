@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const { spawn, execFile } = require('child_process');
 const { randomUUID } = require('crypto');
+const os = require('os');
+const path = require('path');
 const config = require('../config');
 
 const router = Router();
@@ -17,6 +19,11 @@ router.get('/formats', (req, res) => {
 
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
+  }
+
+  const youtubeUrlPattern = /^https?:\/\/(www\.)?(youtube\.com\/watch\?.*v=|youtu\.be\/).+/;
+  if (!youtubeUrlPattern.test(url)) {
+    return res.status(400).json({ error: 'invalid YouTube URL' });
   }
 
   try {
@@ -181,6 +188,15 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'invalid YouTube URL' });
   }
 
+  // Reject outputPath that escapes the user's home directory
+  if (outputPath) {
+    const home = os.homedir();
+    const resolved = path.resolve(outputPath);
+    if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+      return res.status(400).json({ error: 'invalid output path' });
+    }
+  }
+
   if (activeDownloads >= MAX_CONCURRENT) {
     return res.status(429).json({ error: 'too many concurrent downloads' });
   }
@@ -233,6 +249,17 @@ router.post('/', (req, res) => {
   // Keep a handle on the process so the DELETE route can cancel it
   jobs[jobId].process = proc;
   proc.stderr.on('data', (chunk) => { stderrOutput += chunk.toString(); });
+
+  // Handles the case where yt-dlp is not installed or not in PATH
+  proc.on('error', (err) => {
+    delete jobs[jobId].process;
+    jobs[jobId].status = 'failed';
+    jobs[jobId].error = err.code === 'ENOENT'
+      ? 'yt-dlp not found — is it installed and in PATH?'
+      : err.message;
+    activeDownloads--;
+    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+  });
 
   // Parse yt-dlp's [download] progress lines off stdout into the job record
   proc.stdout.on('data', (data) => {

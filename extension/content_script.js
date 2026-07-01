@@ -305,7 +305,7 @@ function showFormats(contentDiv, formats) {
         return;
       }
 
-      // Server unreachable or zenity failed — show a visible error
+      // Network error — server is not running
       if (outputPath === false) {
         if (btn) {
           btn.disabled = false;
@@ -313,6 +313,18 @@ function showFormats(contentDiv, formats) {
           btn.style.cursor = 'pointer';
         }
         showStatus('✗ Server not running', 'failed');
+        setTimeout(clearStatus, 4000);
+        return;
+      }
+
+      // Server responded but picker failed (e.g. zenity not installed)
+      if (outputPath && typeof outputPath === 'object') {
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+        }
+        showStatus('✗ ' + outputPath.pickError, 'failed');
         setTimeout(clearStatus, 4000);
         return;
       }
@@ -365,11 +377,12 @@ function clearStatus() {
 // onEnd is called on every terminal path so the caller can release its lock
 async function pollStatus(jobId, onEnd) {
   let polls = 0;
-  const MAX_POLLS = 60;
+  const MAX_POLLS = 300; // 300 × 2 s = 10 min; covers large downloads
 
   async function tick() {
     if (polls >= MAX_POLLS) {
-      showStatus('✗ Timed out', 'failed');
+      // Stop inline tracking; the progress panel continues independently
+      clearStatus();
       onEnd();
       return;
     }
@@ -378,6 +391,12 @@ async function pollStatus(jobId, onEnd) {
     let data;
     try {
       const res = await fetch(STATUS_ENDPOINT + '/' + jobId);
+      if (res.status === 404) {
+        // Job gone — server restarted or job expired after completion
+        showStatus('✗ Download lost — server restarted?', 'failed');
+        onEnd();
+        return;
+      }
       if (!res.ok) {
         showStatus('✗ Could not reach server', 'failed');
         onEnd();
@@ -417,7 +436,9 @@ function injectButton() {
     const link = document.createElement('link');
     link.id = 'sur3aa-icons';
     link.rel = 'stylesheet';
-    link.href = 'https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css';
+    link.href = 'https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.44.0/dist/tabler-icons.min.css';
+    link.integrity = 'sha384-ccZHbezhtZWmNy0cg8odL0D/jFU5k5HIls9y78Qd6lWor7rpvFIZtK0fTFG4z456';
+    link.crossOrigin = 'anonymous';
     document.head.appendChild(link);
   }
 
@@ -433,7 +454,7 @@ function injectButton() {
   btn.style.borderRadius = '18px';
   btn.style.cursor = 'pointer';
   btn.style.fontSize = '13px';
-  btn.style.fontWeight = '500';
+  btn.style.fontWeight = '600';
   btn.style.display = 'inline-flex';
   btn.style.alignItems = 'center';
   btn.style.gap = '6px';
@@ -691,6 +712,7 @@ async function pollProgressPanel() {
   (data.jobs || []).forEach((job) => {
     activeJobs[job.jobId] = job;
   });
+  if (Object.keys(activeJobs).length > 0) ensureProgressPanel();
   renderProgressPanel();
 
   const ids = Object.keys(activeJobs);
@@ -711,15 +733,20 @@ async function pollProgressPanel() {
 // Asks the server to open a native folder picker.
 // Returns the chosen path string on success, null if the user cancelled, or
 // false if the server could not be reached / zenity failed.
+// Returns: path string on success, null if cancelled, false if server is down,
+// or { pickError: string } if the server responded but the picker failed (e.g. zenity missing).
 async function pickFolder() {
   try {
     const res = await fetch(PICK_FOLDER_ENDPOINT);
-    if (res.status === 204) return null;  // user cancelled in zenity
-    if (!res.ok) return false;            // zenity or server error
+    if (res.status === 204) return null;
+    if (!res.ok) {
+      let msg = 'folder picker unavailable';
+      try { msg = (await res.json()).error || msg; } catch {}
+      return { pickError: msg };
+    }
     const data = await res.json();
     return data.path || false;
   } catch {
-    // network error — server is probably not running
     return false;
   }
 }
@@ -820,6 +847,9 @@ if (window.location.href.includes('/watch')) {
 // extension, so we listen for YouTube's internal navigation event instead
 window.addEventListener('yt-navigate-finish', function () {
   if (window.location.href.includes('/watch')) {
+    // Reset the poll loop so it restarts cleanly when the next download begins
+    clearInterval(progressPollInterval);
+    progressPollInterval = null;
     onVideoPage();
   } else {
     document.getElementById('sur3aa-btn')?.remove();

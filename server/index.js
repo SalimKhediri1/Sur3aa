@@ -5,7 +5,16 @@ const downloadRouter = require('./routes/download');
 
 const app = express();
 
-app.use(cors({ origin: '*' }));
+// Allow requests only from the YouTube page (content script) or the extension popup
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || origin === 'https://www.youtube.com' || origin.startsWith('chrome-extension://')) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
 app.use(express.json());
 
 app.get('/ping', (req, res) => {

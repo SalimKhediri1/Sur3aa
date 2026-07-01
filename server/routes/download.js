@@ -277,9 +277,15 @@ router.post('/', (req, res) => {
     const end   = endTime   || 'inf';
     args.push('--download-sections', `*${start}-${end}`);
   } else {
-    // Full downloads use parallel fragments for speed
-    args.push('--concurrent-fragments', '4');
+    // Full downloads: 8 parallel fragments + larger read buffer for speed
+    args.push('--concurrent-fragments', '8', '--buffer-size', '16K');
   }
+
+  // Force yt-dlp to emit one progress line per update (newline) instead of
+  // overwriting a terminal line with carriage returns (\r). Without this the
+  // stdout chunks contain \r-delimited updates that never match the \n split
+  // and progress stays stuck at 0%.
+  args.push('--newline');
 
   let stderrOutput = '';
   const proc = spawn('yt-dlp', args);
@@ -308,9 +314,11 @@ router.post('/', (req, res) => {
     finalize();
   });
 
-  // Parse yt-dlp's [download] progress lines off stdout into the job record
+  // Parse yt-dlp's [download] progress lines off stdout into the job record.
+  // Split on both \n and \r so progress updates aren't missed if a chunk
+  // arrives with carriage returns (can happen even with --newline on some builds).
   proc.stdout.on('data', (data) => {
-    const lines = data.toString().split('\n');
+    const lines = data.toString().split(/[\n\r]+/);
     lines.forEach((line) => {
       // `~?` also matches yt-dlp's estimated-size lines (e.g. "of ~12.00MiB")
       const match = line.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);

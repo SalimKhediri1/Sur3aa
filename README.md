@@ -86,6 +86,5 @@ If you see **Server not running** next to the button, run `systemctl --user star
 
 - The server uses near-zero CPU when idle. It wakes only when the extension calls it.
 - Formats are prefetched as soon as you open a YouTube video, so the panel opens instantly when you click Download.
-- **Linux only:** the folder picker requires **zenity**, install with `sudo apt install zenity` if missing.
-- yt-dlp uses 4 parallel fragment connections per download for faster speeds.
+- yt-dlp uses 8 parallel fragment connections per download for faster speeds.
 - The server handles up to 3 concurrent downloads.

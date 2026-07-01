@@ -1,53 +1,44 @@
 # Sur3aa — Project Instructions for Claude Code
 
-## Role division
-- **Claude.ai (monitor):** architecture decisions, explanations, phase planning, reviewing output, catching mistakes.
-- **Claude Code (executor):** writes files, runs commands, edits code based on explicit instructions.
-
-## How to receive instructions
-Claude Code will receive tasks as structured instructions. Each instruction will specify:
-- **What to do** (the task)
-- **Where to do it** (file paths)
-- **Why** (brief context so decisions stay consistent)
-- **What NOT to do** (constraints)
-
-Do not improvise beyond the instruction scope. If something is ambiguous, output a question prefixed with `[CLARIFICATION NEEDED]` instead of guessing.
-
 ## Project overview
-Sor3a is a personal YouTube downloader with two parts:
-1. A **Brave browser extension** that detects YouTube pages and triggers downloads.
-2. A **local Node.js server** that receives download requests and runs yt-dlp.
+Sur3aa (سرعة) is a personal YouTube download manager: a Brave/Chrome extension + a local Node.js server. The extension injects a Download button into YouTube pages. The server runs yt-dlp and ffmpeg in the background.
 
 ## Repo structure
+```
 sur3aa/
-├── CLAUDE.md               ← this file
-├── server/                 ← Node.js local server
-│   ├── index.js
-│   ├── package.json
+├── extension/
+│   ├── manifest.json          — MV3 manifest, declares permissions and host_permissions
+│   ├── content_script.js      — injected into youtube.com; button, format panel, progress UI
+│   ├── background.js          — service worker (minimal, currently just logs load)
+│   └── popup/
+│       ├── popup.html
+│       └── popup.js           — download job list with live polling
+├── server/
+│   ├── index.js               — Express app, CORS + Host guard, loopback-only binding
+│   ├── config.js              — port and default download path
 │   └── routes/
-└── extension/              ← Brave/Chrome extension
-    ├── manifest.json
-    ├── content_script.js
-    ├── background.js
-    └── popup/
+│       └── download.js        — all download logic: /formats, /status, /jobs, /pick-folder, POST /
+├── setup.sh                   — Linux/macOS: installs ffmpeg, zenity, yt-dlp, npm deps, systemd service
+├── setup.bat                  — Windows: same via winget + Startup folder autostart
+├── start-server.bat           — Windows: start server visibly (debugging)
+├── start-server-hidden.vbs    — Windows: start server silently
+└── stop-server.bat            — Windows: kill process on port 3333
+```
 
-## Coding principles
-- Keep files small and single-purpose.
-- Prefer clarity over cleverness — this codebase should be readable by someone learning.
-- Add a one-line comment above any non-obvious block of code.
-- Do not install packages that aren't explicitly requested.
-- Do not modify files outside the scope of the current instruction.
-- Each phase ends with a git commit before moving to the next. Commit message format: "Phase N: short description"
+## Architecture decisions worth knowing
+- Server binds to `127.0.0.1` only — never reachable from the LAN.
+- Every request is checked against an `isAllowedOrigin` guard (youtube.com / chrome-extension://) AND a Host header whitelist (localhost:3333 / 127.0.0.1:3333) to block CSRF and DNS-rebinding.
+- `spawn('yt-dlp', args)` — always array form, never shell string. URL is regex-validated before it reaches the process.
+- Full downloads: `--concurrent-fragments 8 --buffer-size 16K --newline`.
+- Segment downloads (`--download-sections`): yt-dlp hands URLs directly to ffmpeg, so there are no `[download] X%` stdout lines. Progress is parsed from ffmpeg's stderr `time=HH:MM:SS` output.
+- `outputPath` is validated with `fs.realpathSync` (resolves symlinks) to stay within `os.homedir()`.
 
 ## Tech stack
-- Server: Node.js, Express, child_process (for yt-dlp)
+- Server: Node.js, Express, `child_process.spawn` / `execFile`
 - Extension: Vanilla JS, Manifest V3
-- No frameworks, no bundlers unless explicitly introduced later.
+- No bundler, no TypeScript, no frameworks.
 
-## Communication protocol (extension ↔ server)
-- Extension sends POST requests to http://localhost:3333
-- Server responds with JSON
-- CORS must be enabled on the server for extension origins
-
-## Current phase
-Phase 7 complete — setup scripts added, README updated
+## Coding principles
+- No packages beyond what's already in `package.json` unless explicitly requested.
+- No shell strings passed to child processes — always argv arrays.
+- Don't modify files outside the scope of the current task.

@@ -270,6 +270,17 @@ router.post('/', (req, res) => {
 
   const isSegment = startTime || endTime;
 
+  // Pre-compute segment duration in seconds so we can derive a progress % from
+  // ffmpeg's time= output (see stderr handler below). Only possible when both
+  // endpoints are known; open-ended clips (no endTime) get no percentage.
+  const parseHMS = (hms) => {
+    const p = hms.split(':').map(Number);
+    return p[0] * 3600 + p[1] * 60 + (p[2] || 0);
+  };
+  const segmentDuration = (isSegment && startTime && endTime)
+    ? parseHMS(endTime) - parseHMS(startTime)
+    : null;
+
   if (isSegment) {
     // --concurrent-fragments conflicts with --download-sections in yt-dlp;
     // skip it for segment downloads so the slice actually works.
@@ -291,7 +302,26 @@ router.post('/', (req, res) => {
   const proc = spawn('yt-dlp', args);
   // Keep a handle on the process so the DELETE route can cancel it
   jobs[jobId].process = proc;
-  proc.stderr.on('data', (chunk) => { stderrOutput += chunk.toString(); });
+
+  proc.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    stderrOutput += text;
+
+    // With --download-sections, yt-dlp hands the URLs directly to ffmpeg and
+    // emits NO [download] X% lines. ffmpeg writes its own progress to stderr:
+    //   frame=  20 fps=25 q=28.0 size=  1234kB time=00:00:04.10 speed=4.00x
+    // We parse "time=" to get elapsed output seconds and divide by the known
+    // segment duration to produce a real percentage.
+    if (isSegment && segmentDuration > 0) {
+      const m = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
+      if (m) {
+        const elapsed = parseHMS(m[1]);
+        jobs[jobId].percent = Math.min(99, Math.round(elapsed / segmentDuration * 100));
+        const speedMatch = text.match(/speed=\s*([\d.]+x)/);
+        if (speedMatch) jobs[jobId].speed = speedMatch[1];
+      }
+    }
+  });
 
   // A missing yt-dlp fires both 'error' and 'close'; finalize only once so the
   // concurrency counter stays accurate and the cap keeps working.

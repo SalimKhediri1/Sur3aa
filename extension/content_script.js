@@ -418,6 +418,9 @@ async function pollStatus(jobId, onEnd) {
       setTimeout(clearStatus, 5000);
     } else if (data.status === 'failed') {
       showStatus('✗ Failed', 'failed');
+      // Surface the real reason on hover so a failure isn't a mystery
+      const el = document.getElementById('sur3aa-status');
+      if (el && data.error) el.title = data.error;
       onEnd();
       setTimeout(clearStatus, 5000);
     } else if (data.status === 'cancelled') {
@@ -431,17 +434,6 @@ async function pollStatus(jobId, onEnd) {
 }
 
 function injectButton() {
-  // Tabler icon font isn't on YouTube by default — inject it once per page load
-  if (!document.getElementById('sur3aa-icons')) {
-    const link = document.createElement('link');
-    link.id = 'sur3aa-icons';
-    link.rel = 'stylesheet';
-    link.href = 'https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.44.0/dist/tabler-icons.min.css';
-    link.integrity = 'sha384-ccZHbezhtZWmNy0cg8odL0D/jFU5k5HIls9y78Qd6lWor7rpvFIZtK0fTFG4z456';
-    link.crossOrigin = 'anonymous';
-    document.head.appendChild(link);
-  }
-
   if (document.getElementById('sur3aa-btn')) return;
 
   const btn = document.createElement('button');
@@ -460,10 +452,11 @@ function injectButton() {
   btn.style.gap = '6px';
   btn.style.fontFamily = 'sans-serif';
 
-  const icon = document.createElement('i');
-  icon.className = 'ti ti-download';
-  icon.style.fontSize = '14px';
+  // Inline download glyph — no external icon font, so nothing loads from a CDN
+  const icon = document.createElement('span');
+  icon.style.display = 'inline-flex';
   icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M7 11l5 5 5-5"/><path d="M12 4v12"/></svg>';
   btn.appendChild(icon);
   const label = document.createTextNode('Download');
   btn.appendChild(label);
@@ -496,7 +489,7 @@ function injectButton() {
 
   const target = document.querySelector('#above-the-fold #top-row');
   if (!target) {
-    console.log('[Sur3aa] could not find injection target');
+    // Injection target not ready yet — the MutationObserver will retry
     return;
   }
   target.appendChild(btn);
@@ -522,6 +515,14 @@ const PROGRESS_STATUS_LABELS = {
   failed: 'Failed',
   cancelled: 'Cancelled',
 };
+
+// Trim a yt-dlp error down to something that fits on one line in the panel.
+// Strips the noisy "ERROR:" prefix yt-dlp adds and caps the length.
+function shortenError(err) {
+  if (!err) return '';
+  const clean = String(err).replace(/^ERROR:\s*/i, '').trim();
+  return clean.length > 70 ? clean.slice(0, 70) + '…' : clean;
+}
 
 // Builds and returns the persistent progress panel element
 function createProgressPanel() {
@@ -652,10 +653,20 @@ function renderProgressPanel() {
 
     const detail = document.createElement('span');
     detail.style.fontSize = '11px';
-    detail.style.color = '#888';
-    detail.textContent = job.status === 'pending'
-      ? `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`
-      : '';
+    detail.style.color = job.status === 'failed' ? '#fca5a5' : '#888';
+    detail.style.overflow = 'hidden';
+    detail.style.textOverflow = 'ellipsis';
+    detail.style.whiteSpace = 'nowrap';
+    detail.style.maxWidth = '250px';
+    if (job.status === 'pending') {
+      detail.textContent = `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`;
+    } else if (job.status === 'failed') {
+      // Show the real reason (truncated) and keep the full text as a tooltip
+      detail.textContent = shortenError(job.error) || 'Failed';
+      if (job.error) detail.title = job.error;
+    } else {
+      detail.textContent = '';
+    }
     bottom.appendChild(detail);
 
     if (job.status === 'pending') {
@@ -709,14 +720,30 @@ async function pollProgressPanel() {
     return;
   }
 
-  (data.jobs || []).forEach((job) => {
-    activeJobs[job.jobId] = job;
-  });
-  if (Object.keys(activeJobs).length > 0) ensureProgressPanel();
-  renderProgressPanel();
+  const serverJobs = data.jobs || [];
+  const serverIds = new Set(serverJobs.map((j) => j.jobId));
+
+  // Drop any job the server no longer knows about (e.g. it was restarted) so a
+  // download can't stay stuck on "Downloading" forever after the server resets.
+  for (const id in activeJobs) {
+    if (!serverIds.has(id)) delete activeJobs[id];
+  }
+  serverJobs.forEach((job) => { activeJobs[job.jobId] = job; });
 
   const ids = Object.keys(activeJobs);
-  const allTerminal = ids.length > 0 && ids.every((id) => {
+
+  // Nothing left to show — tear the panel down and stop polling
+  if (ids.length === 0) {
+    clearInterval(progressPollInterval);
+    progressPollInterval = null;
+    document.getElementById('sur3aa-progress-panel')?.remove();
+    return;
+  }
+
+  ensureProgressPanel();
+  renderProgressPanel();
+
+  const allTerminal = ids.every((id) => {
     const s = activeJobs[id].status;
     return s === 'done' || s === 'failed' || s === 'cancelled';
   });
@@ -753,10 +780,7 @@ async function pickFolder() {
 
 async function triggerDownload(format, outputPath = null, startTime = '', endTime = '') {
   // Refuse to start a second download while one is still running
-  if (downloadInProgress) {
-    console.log('[Sur3aa] download already in progress');
-    return;
-  }
+  if (downloadInProgress) return;
   downloadInProgress = true;
 
   // Disable the button while the download runs
@@ -778,7 +802,6 @@ async function triggerDownload(format, outputPath = null, startTime = '', endTim
   }
 
   const url = window.location.href;
-  console.log('[Sur3aa] sending download request for:', url);
   try {
     const res = await fetch(DOWNLOAD_ENDPOINT, {
       method: 'POST',
@@ -809,7 +832,6 @@ async function triggerDownload(format, outputPath = null, startTime = '', endTim
 }
 
 function onVideoPage() {
-  console.log('[Sur3aa] video page detected:', window.location.href);
   // Invalidate any previous video's cache and cancel the in-flight prefetch
   cachedFormats = null;
   formatsLoading = false;
@@ -825,7 +847,6 @@ function onVideoPage() {
     // Give up after 50 mutations so we don't observe forever on non-video pages
     if (attempts > 50) {
       observer.disconnect();
-      console.log('[Sur3aa] gave up waiting for injection target');
       return;
     }
     if (!document.getElementById('sur3aa-btn')) {

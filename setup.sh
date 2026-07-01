@@ -27,16 +27,17 @@ esac
 
 echo "==> Detected platform: $PLATFORM"
 
-# --- Install ffmpeg ---
-echo "==> Installing ffmpeg..."
+# --- Install ffmpeg and zenity ---
+# ffmpeg merges the video/audio streams; zenity provides the folder picker dialog.
+echo "==> Installing ffmpeg and zenity..."
 if [ "$PLATFORM" = "linux" ]; then
   if command -v apt >/dev/null 2>&1; then
-    sudo apt install -y ffmpeg
+    sudo apt install -y ffmpeg zenity
   elif command -v dnf >/dev/null 2>&1; then
     # Fedora fallback when apt isn't available
-    sudo dnf install -y ffmpeg
+    sudo dnf install -y ffmpeg zenity
   else
-    echo "Error: neither apt nor dnf was found. Please install ffmpeg manually, then re-run this script."
+    echo "Error: neither apt nor dnf was found. Please install ffmpeg and zenity manually, then re-run this script."
     exit 1
   fi
 elif [ "$PLATFORM" = "macos" ]; then

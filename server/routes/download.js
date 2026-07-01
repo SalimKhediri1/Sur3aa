@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { spawn, execFile } = require('child_process');
 const { randomUUID } = require('crypto');
 const os = require('os');
+const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 
@@ -13,6 +14,15 @@ const jobs = {};
 // Cap on simultaneous yt-dlp processes
 let activeDownloads = 0;
 const MAX_CONCURRENT = 3;
+
+// Cap on simultaneous format lookups so /formats can't be used to spawn an
+// unbounded number of yt-dlp processes and exhaust the machine.
+let activeFormatFetches = 0;
+const MAX_FORMAT_FETCHES = 3;
+
+// Only one native folder picker may be open at a time — this stops a page from
+// spamming dialogs onto the user's screen.
+let pickerOpen = false;
 
 router.get('/formats', (req, res) => {
   const { url } = req.query;
@@ -26,8 +36,14 @@ router.get('/formats', (req, res) => {
     return res.status(400).json({ error: 'invalid YouTube URL' });
   }
 
+  if (activeFormatFetches >= MAX_FORMAT_FETCHES) {
+    return res.status(429).json({ error: 'too many format requests' });
+  }
+  activeFormatFetches++;
+
   try {
     execFile('yt-dlp', ['--dump-json', '--skip-download', '--no-playlist', url], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      activeFormatFetches--;
       if (err) {
         return res.status(500).json({ error: 'failed to fetch formats' });
       }
@@ -76,6 +92,8 @@ router.get('/formats', (req, res) => {
       return res.json({ formats: result });
     });
   } catch {
+    // execFile threw before the callback could run — release the slot here
+    activeFormatFetches--;
     res.status(500).json({ error: 'failed to fetch formats' });
   }
 });
@@ -124,8 +142,25 @@ router.delete('/:jobId', (req, res) => {
 
 // Opens a native folder picker and returns the chosen path.
 // Uses PowerShell on Windows and zenity on Linux.
-router.get('/pick-folder', async (req, res) => {
+router.get('/pick-folder', (req, res) => {
   const { spawn } = require('child_process');
+
+  // Refuse to open a second dialog while one is already on screen
+  if (pickerOpen) {
+    return res.status(429).json({ error: 'a folder picker is already open' });
+  }
+  pickerOpen = true;
+
+  // A child process can emit both 'error' and 'close'. finish() guarantees we
+  // release the lock and send the HTTP response exactly once, so we never crash
+  // with "headers already sent".
+  let done = false;
+  const finish = (send) => {
+    if (done) return;
+    done = true;
+    pickerOpen = false;
+    send();
+  };
 
   if (process.platform === 'win32') {
     const ps = spawn('powershell', [
@@ -137,19 +172,16 @@ router.get('/pick-folder', async (req, res) => {
     ]);
 
     let selectedPath = '';
-    let stderrOutput = '';
 
     ps.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
-    ps.stderr.on('data', (data) => { stderrOutput += data.toString(); });
 
-    ps.on('close', () => {
+    ps.on('close', () => finish(() => {
       if (selectedPath) return res.json({ path: selectedPath });
       return res.status(204).end();
-    });
+    }));
 
-    ps.on('error', (err) => {
-      return res.status(500).json({ error: 'powershell not found', detail: err.message });
-    });
+    ps.on('error', (err) => finish(() =>
+      res.status(500).json({ error: 'powershell not found', detail: err.message })));
   } else {
     const zenity = spawn('zenity', ['--file-selection', '--directory', '--title=Sur3aa - Choose download folder']);
 
@@ -159,15 +191,14 @@ router.get('/pick-folder', async (req, res) => {
     zenity.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
     zenity.stderr.on('data', (data) => { stderrOutput += data.toString(); });
 
-    zenity.on('close', (code) => {
+    zenity.on('close', (code) => finish(() => {
       if (code === 0 && selectedPath) return res.json({ path: selectedPath });
       if (code === 1) return res.status(204).end();
       return res.status(500).json({ error: 'zenity failed', detail: stderrOutput });
-    });
+    }));
 
-    zenity.on('error', (err) => {
-      return res.status(500).json({ error: 'zenity not found', detail: err.message });
-    });
+    zenity.on('error', (err) => finish(() =>
+      res.status(500).json({ error: 'zenity not found', detail: err.message })));
   }
 });
 
@@ -188,11 +219,17 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'invalid YouTube URL' });
   }
 
-  // Reject outputPath that escapes the user's home directory
+  // Reject outputPath that escapes the user's home directory.
+  // realpath resolves symlinks too, so a link inside home can't point outside it.
   if (outputPath) {
-    const home = os.homedir();
-    const resolved = path.resolve(outputPath);
-    if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+    try {
+      const home = fs.realpathSync(os.homedir());
+      const resolved = fs.realpathSync(path.resolve(outputPath));
+      if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+        return res.status(400).json({ error: 'invalid output path' });
+      }
+    } catch {
+      // Path doesn't exist or can't be resolved — reject it
       return res.status(400).json({ error: 'invalid output path' });
     }
   }
@@ -250,6 +287,17 @@ router.post('/', (req, res) => {
   jobs[jobId].process = proc;
   proc.stderr.on('data', (chunk) => { stderrOutput += chunk.toString(); });
 
+  // A missing yt-dlp fires both 'error' and 'close'; finalize only once so the
+  // concurrency counter stays accurate and the cap keeps working.
+  let finalized = false;
+  function finalize() {
+    if (finalized) return;
+    finalized = true;
+    activeDownloads--;
+    // Clean up after 5 minutes to prevent memory leaks
+    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+  }
+
   // Handles the case where yt-dlp is not installed or not in PATH
   proc.on('error', (err) => {
     delete jobs[jobId].process;
@@ -257,8 +305,7 @@ router.post('/', (req, res) => {
     jobs[jobId].error = err.code === 'ENOENT'
       ? 'yt-dlp not found — is it installed and in PATH?'
       : err.message;
-    activeDownloads--;
-    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+    finalize();
   });
 
   // Parse yt-dlp's [download] progress lines off stdout into the job record
@@ -278,10 +325,12 @@ router.post('/', (req, res) => {
 
   proc.on('close', (code) => {
     delete jobs[jobId].process;
+    // If the 'error' handler already recorded the outcome, don't overwrite its
+    // (more descriptive) message with a generic one.
+    if (finalized) return;
     // A killed (cancelled) process stays cancelled; don't overwrite its status
     if (jobs[jobId].status === 'cancelled') {
-      activeDownloads--;
-      setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+      finalize();
       return;
     }
     if (code === 0) {
@@ -297,9 +346,7 @@ router.post('/', (req, res) => {
         .pop() || 'unknown error';
       jobs[jobId].error = lastMeaningfulLine;
     }
-    activeDownloads--;
-    // Clean up after 5 minutes to prevent memory leaks
-    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
+    finalize();
   });
 });
 

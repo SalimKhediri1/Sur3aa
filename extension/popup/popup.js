@@ -23,6 +23,13 @@ const STATUS_LABELS = {
   cancelled: 'Cancelled',
 };
 
+// Trim a yt-dlp error to one readable line (drops the noisy "ERROR:" prefix)
+function shortenError(err) {
+  if (!err) return '';
+  const clean = String(err).replace(/^ERROR:\s*/i, '').trim();
+  return clean.length > 60 ? clean.slice(0, 60) + '…' : clean;
+}
+
 // Render the list of jobs into #job-list
 function renderJobs(jobs) {
   const list = document.getElementById('job-list');
@@ -67,10 +74,16 @@ function renderJobs(jobs) {
 
     const detail = document.createElement('span');
     detail.className = 'job-detail';
-    // Only show speed/ETA detail while the download is in progress
-    detail.textContent = job.status === 'pending'
-      ? `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`
-      : '';
+    // Show speed/ETA while downloading, and the reason when it failed
+    if (job.status === 'pending') {
+      detail.textContent = `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`;
+    } else if (job.status === 'failed') {
+      detail.textContent = shortenError(job.error) || 'Failed';
+      detail.style.color = '#fca5a5';
+      if (job.error) detail.title = job.error;
+    } else {
+      detail.textContent = '';
+    }
 
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'cancel-btn';

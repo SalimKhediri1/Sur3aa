@@ -1,145 +1,148 @@
-# Sur3aa, سرعة
+# Sur3aa — سرعة
 
-A YouTube download manager for Chrome and Brave. The extension adds a **Download** button to video pages. A local Node.js server uses yt-dlp and ffmpeg to save videos, MP3 audio, or a trimmed clip.
+Download YouTube videos, save audio as MP3, or save just part of a video. Sur3aa adds a **Download** button to YouTube in Chrome or Brave.
 
-The server listens only on `127.0.0.1:3333`. Downloads go directly from YouTube to your computer. Sur3aa has no cloud service, accounts, or tracking.
+Your files are saved on your own computer. You do not need a Sur3aa account.
 
-## Start here
+## Before you start
 
-Sur3aa has two parts: the browser extension and a local download companion. **Install the companion once before loading the extension.**
+You need a **Windows 10/11** or **Linux** computer with a desktop, **Chrome or Brave**, and an internet connection. macOS is not supported yet.
 
-1. Download and extract the **entire project** into a permanent folder.
-2. Install Node.js 22 or newer from [nodejs.org](https://nodejs.org/).
-3. Run setup: double click `setup.bat` on Windows, or run `./setup.sh` from the project folder in a Linux terminal. Wait for setup to finish successfully.
-4. Load the `extension/` folder using your browser's **Load unpacked** button, as described below.
-5. Open YouTube and use **Download**. You do not need to keep a server terminal open after successful automatic startup setup.
+**There are two setup steps:** run Sur3aa's setup file, then add the extension to your browser. Setup starts the helper that downloads your videos. Adding only the extension will show a “Server unavailable” message.
 
-Setup starts the companion immediately and configures startup at login on Windows and graphical Linux systems with a systemd user session. Other Linux sessions require the manual start command printed by setup. Keep the project folder: startup uses files inside it.
+## 1. Download Sur3aa
 
-## Sharing and distribution
+1. Open [Sur3aa on GitHub](https://github.com/SalimKhediri1/Sur3aa).
+2. Click the green **Code** button, then **Download ZIP**.
+3. Extract the ZIP. On Windows, right-click it and choose **Extract All**. On Linux, use your archive app's **Extract** button.
+4. Put the extracted folder somewhere you will keep it, such as **Documents**. Open it: you should see `setup.bat`, `setup.sh`, and a folder named `extension`.
 
-Share the whole project with these installation instructions, rather than sharing only `extension/`. Loading the extension alone cannot install Node.js, yt-dlp, ffmpeg, or the companion service. A Chrome native messaging host could launch an installed companion, but it also requires a separate operating-system installation; see [Chrome's native messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
+Keep this folder after setup. Sur3aa needs the files inside it to run.
 
-Direct distribution through the project's GitHub repository lets users load the extension in Developer mode. Chrome Web Store publishing requires a [one-time developer registration fee](https://developer.chrome.com/docs/webstore/register). More importantly for Sur3aa, Google's [violation guidance](https://developer.chrome.com/docs/webstore/troubleshooting#prohibited-products) explicitly lists facilitating YouTube video downloads as a reason for rejection or removal. The current YouTube downloader should therefore be distributed directly rather than relying on Web Store approval.
+## 2. Set up your computer
 
-## Requirements
+Follow the instructions for **your operating system**.
 
-- **Node.js 22 or newer**, including npm, from [nodejs.org](https://nodejs.org/).
-- Chrome or Brave.
-- Windows 10/11 with Windows PowerShell, or Linux with a graphical desktop.
-- An internet connection for setup and downloads.
+### Windows
 
-Node 22 is required because current yt-dlp YouTube support uses an external JavaScript runtime. Sur3aa explicitly enables the installed Node executable. Official yt-dlp downloads include its challenge solver scripts. Package manager installations may require an extra package, see the [yt-dlp runtime guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+1. Visit [nodejs.org](https://nodejs.org/) and download the **LTS Windows installer**. Sur3aa needs Node.js version 22 or newer. Node.js is the program that runs the download helper.
+2. Open the installer and follow its steps. Keep the default options, including **npm**.
+3. Open your extracted Sur3aa folder and double-click **`setup.bat`**. If Windows hides file extensions, it may appear as **setup**, with the type **Windows Batch File**.
+4. Wait while setup downloads the tools it needs. Allow the installation prompts for those tools. Keep the window open while setup is running.
+5. When setup succeeds, the window may close. Continue to step 3 below. If it shows an error and stays open, read the [help section](#need-help).
 
-## Windows setup
+The helper starts immediately and starts again when you sign in to Windows. You do not need to keep a terminal window open.
 
-Extract or clone the entire project into a permanent folder. Install Node.js first, then double click `setup.bat`. It installs missing yt-dlp and ffmpeg through winget, installs the locked server dependencies, checks the tools, starts the server, and creates a login shortcut pointing to this project.
+### Linux
 
-If winget is unavailable, install Microsoft's **App Installer** or install yt-dlp and ffmpeg yourself and put them on PATH. Already installed tools are reused. Setup records their absolute paths so a new tool is available immediately without logging out.
+1. Visit [nodejs.org](https://nodejs.org/) and follow its **Linux installation instructions** for Node.js 22 or newer, including npm. If you already have it installed, skip this step.
+2. Open your extracted Sur3aa folder in your file manager.
+3. Right-click an empty area and choose **Open in Terminal**. The wording may differ on your desktop. Make sure this folder contains `setup.sh`.
+4. Copy this command into the terminal and press **Enter**:
 
-To skip the login shortcut, run from Command Prompt:
+   ```bash
+   bash setup.sh
+   ```
 
-```cmd
-setup.bat -NoAutostart
-```
+5. If setup asks for your password to install missing tools, type your computer's password and press **Enter**. Linux does not display characters while you type a password; that is normal.
+6. Wait for **“Sur3aa is running and will start at login.”** Then continue to step 3 below.
 
-Keep the project in its current folder. If you move it, stop the server first and run setup again from the new location.
+Most Linux desktops can start the helper automatically when you sign in. If setup instead says **“Start manually”**, copy the command it prints, run it in that terminal, and keep the terminal open while using Sur3aa. Repeat that manual start after restarting your computer.
 
-## Linux setup
+## 3. Add Sur3aa to your browser
 
-```bash
-./setup.sh
-```
+1. Open Chrome or Brave.
+2. Copy the address for your browser into its address bar and press **Enter**:
 
-Run as your normal user. Setup requests sudo only for missing system packages. It supports apt, dnf, pacman, and zypper. Distribution repositories must provide ffmpeg, zenity, and Python 3. If yours does not, install those tools manually first. Setup installs the official yt-dlp executable into `~/.local/bin` when missing and uses `npm ci` for reproducible dependencies.
+   | Browser | Address |
+   |---|---|
+   | Chrome | `chrome://extensions` |
+   | Brave | `brave://extensions` |
 
-On a graphical systemd user session, it creates and starts a user service. Otherwise it prints the command to start the server manually. To install dependencies without changing autostart:
+3. Turn on **Developer mode**, usually in the top-right corner. This lets you add an extension from your computer.
+4. Click **Load unpacked**.
+5. Find the Sur3aa folder you extracted. Select the **`extension` folder inside it**, then click **Select Folder** or **Open**.
+6. You should see a **Sur3aa** card on the extensions page. Open YouTube, or refresh any YouTube tabs you already had open.
 
-```bash
-./setup.sh --no-autostart
-node server/index.js
-```
+## 4. Download your first video
 
-To update the locally installed yt-dlp when YouTube changes:
+1. Open a video on YouTube.
+2. Click the red **Download** button below the video title.
+3. To save the whole video, leave the two time sliders at their starting positions. To save a clip, move them to choose the start and end.
+4. Choose a video quality, such as **720p**, or choose **Audio only (mp3)**.
+5. Choose where to save the file. Your **Downloads** folder is a good choice. The folder must be inside your personal user folder; external drives are not supported.
+6. Wait for **Done**, then open the folder you chose to find your file.
 
-```bash
-./setup.sh --update-ytdlp
-```
+You can follow progress on the YouTube page or by clicking Sur3aa in your browser's extensions menu (the puzzle-piece icon). Click **Cancel** to stop a download. Closing the progress panel does not stop it.
 
-The shell script supports Linux. macOS is not currently supported.
+You can download up to three items at once. Clips can take longer because Sur3aa processes the video to cut at the times you selected.
 
-**Run the setup for your operating system before loading the extension.** Loading an unpacked extension does not launch the local server.
+Only download content you have permission to save. Some videos, including private, age-restricted, and region-restricted videos, may not work.
 
-## Load the extension
+## Need help?
 
-1. Open `chrome://extensions` or `brave://extensions`.
-2. Enable **Developer mode**.
-3. Choose **Load unpacked** and select the project's `extension/` folder.
+### “Server unavailable” or “Server not running”
 
-After updating the code, click **Reload** on the extension card and refresh open YouTube tabs.
+The download helper is not running. You do not need to buy or rent a server; the helper runs on your own computer.
 
-## Download
+- **First installation:** finish step 2 above before loading the extension.
+- **Windows:** open your Sur3aa folder and double-click `start-server-hidden.vbs`. If that fails, run `setup.bat` again.
+- **Linux:** open a terminal in your Sur3aa folder and run `bash setup.sh` again. If setup prints a manual start command, run it and keep that terminal open.
 
-1. Open a YouTube `/watch` video page and click the red **Download** button below its title.
-2. Choose a video resolution or **Audio only (mp3)**. When the video duration is available, the two slider handles let you select a clip. Leaving both at their edges downloads the full video.
-3. Choose an existing writable folder **inside your user home directory**. Cancel the picker to abandon the request.
-4. Watch progress in the page panel or the extension popup. **Cancel** stops the downloader and its ffmpeg children.
+Then refresh YouTube and try again.
 
-Up to three downloads can run at once. Identical active downloads to the same folder are rejected. Video filenames include the video ID and resolution. MP3 filenames use a separate audio label. Clips include their range. This avoids collisions between video, audio, and clips. The actual video container depends on the selected streams, it may be MP4, WebM, or MKV.
+### Setup says Node.js or npm is missing
 
-Downloads reuse recently fetched video information to avoid repeating the format lookup. Expired media links trigger one fresh lookup automatically. Temporary media stays in a private `.sur3aa-download-*` folder inside your chosen destination, so finishing a large file does not require copying it from another drive. This folder is removed when the download finishes, fails, or is cancelled.
+Install Node.js 22 or newer from [nodejs.org](https://nodejs.org/), keeping npm included. Close and reopen your terminal, then repeat setup.
 
-Clip boundaries are reencoded for accurate cuts and may take more CPU than a full download. Closed progress panels do not stop downloads. The popup can still manage them. Completed jobs stay visible in the server for five minutes; job history resets on restart.
+### Windows setup says “winget” or “App Installer” is missing
 
-Use downloads only for content you have permission to save. Private, age restricted, region restricted, removed videos, and YouTube anti-bot challenges may require capabilities this app does not provide. Live streams have no finite trim slider.
+Open **Microsoft Store**, search for **App Installer** by Microsoft, and install or update it. Then run `setup.bat` again.
 
-## Manage the server
+### Linux says “No such file or directory”
 
-| Action | Windows | Linux with systemd |
-|---|---|---|
-| Start | `start-server-hidden.vbs` | `systemctl --user start sur3aa` |
-| Stop | `stop-server.bat` | `systemctl --user stop sur3aa` |
-| Debug | `start-server.bat` | `journalctl --user -u sur3aa -n 50` |
-| Check status | `http://127.0.0.1:3333/ping` | `systemctl --user status sur3aa` |
-| Remove autostart | Delete `Sur3aa.lnk` from `shell:startup` | `systemctl --user disable --now sur3aa` |
+Your terminal is in the wrong folder. Open the folder containing `setup.sh`, choose **Open in Terminal**, and try `bash setup.sh` again.
 
-Manual start on either platform: `node server/index.js`. Keep that terminal open and use Ctrl+C there to stop it. When upgrading an older Windows installation, stop its old server before running the new setup.
+### The Download button is missing
 
-Windows background logs are in `server/server.log` and `server/server-error.log`. The stop script checks the recorded Node executable and project path before killing a process, instead of killing whoever owns port 3333.
+Check that Sur3aa is switched on at `chrome://extensions` or `brave://extensions`. Open a video page and refresh it. Sur3aa's button appears on video pages, rather than the YouTube home page.
 
-## Troubleshooting
+### A download fails
 
-- **Server unavailable:** check the server status, start it, and reload the extension and YouTube tab. Port 3333 must be free. Sur3aa uses IPv4 explicitly to avoid `localhost` resolving to an IPv6 address the server does not listen on.
-- **Missing tools:** run `npm run doctor --prefix server`. Re-run setup after moving the project or reinstalling tools. `server/tools.json` holds machine specific tool paths and is not shared in git.
-- **Windows yt-dlp update:** use `winget upgrade --id yt-dlp.yt-dlp --exact`, then re-run setup to refresh recorded paths.
-- **Folder picker fails on Linux:** install zenity and run in a graphical session. Re-run setup inside that session so it imports the display environment for systemd. Restart the service after logging into a different graphical session if needed.
-- **Download failed:** hover over the error in the progress panel or popup for the downloader's reason. Update yt-dlp before retrying a YouTube extraction error.
-- **Folder rejected:** the chosen folder must exist, be writable, and resolve inside your home. External drives and symlinks pointing outside home are intentionally rejected.
+Move your mouse over the error message to see more detail. Try another public video to check whether the problem affects only that video.
 
-## Development and verification
+YouTube changes sometimes require an update to the download tool:
 
-No bundler or extra test dependencies are needed.
+- **Linux:** open a terminal in your Sur3aa folder and run `bash setup.sh --update-ytdlp`.
+- **Windows:** open a terminal in your Sur3aa folder and run `winget upgrade --id yt-dlp.yt-dlp --exact`. When it finishes, run `setup.bat` again.
 
-```bash
-npm ci --prefix server
-npm test --prefix server
-npm run doctor --prefix server
-```
+### The folder is rejected or the folder window does not open
 
-On Windows, also run `powershell -NoProfile -ExecutionPolicy Bypass -File server/test/windows-encoding.ps1` to verify that tool paths containing Unicode survive Windows PowerShell's default encoding.
+Choose an existing folder inside your personal user folder, such as **Downloads** or **Documents**. On Linux, run setup from a terminal on your desktop, then try again.
 
-Optional Chromium DOM checks, using a clean temporary profile and simulated API responses:
+### I moved the Sur3aa folder
 
-```bash
-npm run test:browser --prefix server
-```
+Stop the helper using the instructions below, then run setup from the folder's new location. If the extension shows an error, remove its old browser entry and load the new `extension` folder using step 3.
 
-Set `CHROME_BIN` if Chromium has a different executable name. On Linux, `SUR3AA_REAL_EXTENSION=1 npm run test:browser --prefix server` additionally loads the actual extension and checks its connection to the guarded server. Port 3333 must be free.
+## Update or remove Sur3aa
 
-Optional live integration check, which downloads a small public video, MP3, and clip, inspects them with ffprobe, then deletes the test files:
+**To update:** stop the helper, replace the files in your existing Sur3aa folder with the newly downloaded files, and repeat setup. On your browser's extensions page, click **Reload** on the Sur3aa card, then refresh YouTube.
 
-```bash
-npm run test:live --prefix server
-```
+**To stop the helper:**
 
-GitHub Actions runs the regression tests on Linux and Windows with Node 22 and 24, checks scripts, verifies the browser UI on Linux, and exercises Windows start/stop from a folder containing spaces and Unicode. See [the release verification record](docs/release-verification.md) for the checks actually run and remaining manual checks.
+- **Windows:** double-click `stop-server.bat` in your Sur3aa folder.
+- **Linux with automatic startup:** run `systemctl --user stop sur3aa` in a terminal.
+- **Linux with manual startup:** press **Ctrl+C** in the terminal running the helper.
+
+**To remove Sur3aa completely:**
+
+1. Click **Remove** on Sur3aa's card at `chrome://extensions` or `brave://extensions`.
+2. Remove automatic startup:
+   - **Windows:** press **Windows+R**, type `shell:startup`, and press **Enter**. Delete the **Sur3aa** shortcut, then run `stop-server.bat`.
+   - **Linux with automatic startup:** run `systemctl --user disable --now sur3aa`.
+   - **Linux with manual startup:** press **Ctrl+C** in the helper's terminal.
+3. Delete your Sur3aa folder. Files you downloaded into other folders stay there. Node.js and the other tools installed during setup also remain installed.
+
+## For developers
+
+See [the developer guide](docs/development.md) for test commands and advanced setup options, and [the verification record](docs/release-verification.md) for tested behavior and remaining platform checks.

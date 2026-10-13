@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
+const { spawnSync } = require('node:child_process');
 
 async function harness(t, platform = process.platform) {
   let clockOffset = 0;
@@ -192,6 +193,26 @@ test('picker returns immediately, assembles UTF-8 before removing newline, and r
   const failed = await h.request('/pick-folder');
   h.children[1].emit('close', 2);
   assert.equal((await h.request('/pick-folder/' + failed.data.pickerId)).data.status, 'failed');
+});
+
+test('Windows picker activates a topmost owner and cleans up after select, cancel and failure', async t => {
+  const powershell = process.env.SUR3AA_POWERSHELL || (process.platform === 'win32' ? 'powershell.exe' : null);
+  if (!powershell) return t.skip('Requires PowerShell; also runs in Windows CI');
+  const h = await harness(t, 'win32');
+  await h.request('/pick-folder');
+  const child = h.children[0];
+  assert.ok(child.args.includes('-STA'));
+  const scriptFile = path.join(h.home, 'picker-command.ps1');
+  fs.writeFileSync(scriptFile, child.args[child.args.indexOf('-Command') + 1]);
+  for (const outcome of ['OK', 'Cancel', 'Throw']) {
+    const result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'windows-picker.ps1'), '-PickerScriptFile', scriptFile, '-Outcome', outcome], {
+      encoding: 'utf8', timeout: 15000, windowsHide: true,
+    });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    const lines = result.stdout.trim().split(/\r?\n/);
+    assert.deepEqual(lines, outcome === 'OK' ? ['C:\\Users\\testé\\Downloads', 'PASS: OK'] : ['PASS: ' + outcome]);
+  }
+  child.emit('close', 0);
 });
 
 test('format discovery includes videos which already have audio', async t => {

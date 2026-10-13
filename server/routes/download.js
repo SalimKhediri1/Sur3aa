@@ -166,9 +166,15 @@ router.get('/pick-folder', (req, res) => {
   const args = windows ? ['-NoProfile', '-STA', '-Command',
     '[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding;' +
     'Add-Type -AssemblyName System.Windows.Forms;' +
+    // A background server has no foreground window. Give the dialog a topmost
+    // owner so it appears above the browser rather than behind it.
+    '$owner=New-Object System.Windows.Forms.Form;' +
+    '$owner.TopMost=$true;$owner.ShowInTaskbar=$false;$owner.Opacity=0;' +
+    '$owner.FormBorderStyle="None";$owner.Width=1;$owner.Height=1;' +
+    '$owner.StartPosition="CenterScreen";' +
     '$f=New-Object System.Windows.Forms.FolderBrowserDialog;' +
     '$f.Description="Sur3aa - Choose download folder";' +
-    'try{if($f.ShowDialog() -eq "OK"){[Console]::WriteLine($f.SelectedPath)}}finally{$f.Dispose()}',
+    'try{$owner.Show();$owner.Activate();if($f.ShowDialog($owner) -eq "OK"){[Console]::WriteLine($f.SelectedPath)}}finally{$f.Dispose();$owner.Dispose()}',
   ] : ['--file-selection', '--directory', '--title=Sur3aa - Choose download folder'];
   let child;
   let done = false;

@@ -10,7 +10,7 @@ Implementation and automated Linux checks are complete. Native Windows setup, fo
 
 | Check | Result | Scope |
 |---|---|---|
-| Node regression suite | Passed, 19 tests after the download speed follow-up | Worker authorization, API guards, request validation, format discovery and cache, concurrency, process errors, folder lifecycle, paths, progress chunks, cancellation, file isolation |
+| Node regression suite | Passed, 20 tests with PowerShell enabled after the Windows picker follow-up | Worker authorization, API guards, request validation, format discovery and cache, concurrency, process errors, folder lifecycle, paths, progress chunks, cancellation, file isolation, Windows picker ownership and cleanup |
 | Windows Node 22.23.3 under Wine | Passed, final 15 test suite | Real Windows Node runtime and Windows filesystem behavior, mocked downloader and native dialog |
 | Chromium DOM smoke | Passed after the final folder protocol change | Real DOM with simulated API responses, injection, format menu, trim, concurrent requests, cancellation, navigation, progress resumption, popup rendering, popup cancel, HTTP failure |
 | Loaded MV3 extension connection | Passed | Actual content script through worker to guarded local server, fixture YouTube document |
@@ -52,6 +52,10 @@ The live test uses a public 19 second YouTube video and deletes its temporary ou
 5. On a Linux desktop using systemd, verify the picker from the background service after login. This session installed and enabled the persistent service and checked its health. Full native folder selection and a new login session remain manual checks.
 
 ## Verification limits
+
+### Windows picker follow-up
+
+The Windows folder dialog now uses a shown, activated, invisible topmost Windows Forms owner. Both the owner and dialog are disposed in a finally block. Linux's zenity command is unchanged. The real generated PowerShell command passed selection, cancellation, failure cleanup, and Unicode output checks using simulated UI objects in PowerShell 7.6.6 on Linux. This regression also runs under Windows PowerShell in CI. Actual foreground placement still requires confirmation on the user's Windows desktop. The approach uses [Form.TopMost](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.form.topmost?view=netframework-4.8.1) and the dialog's owner overload.
 
 ### Download speed follow-up
 

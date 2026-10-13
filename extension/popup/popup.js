@@ -1,6 +1,9 @@
 // Base server URL — all job endpoints live under /download
-const SERVER = 'http://localhost:3333';
+const SERVER = 'http://127.0.0.1:3333';
 const POLL_INTERVAL = 2000;
+const SERVER_SETUP_HINT = /Windows/.test(navigator.userAgent)
+  ? 'Run setup.bat in the project folder once to install and start the local server.'
+  : 'Run ./setup.sh in the project folder once to install and start the local server.';
 
 // Turn a full YouTube URL into a short, readable label
 function extractTitle(url) {
@@ -108,7 +111,7 @@ function renderJobs(jobs) {
 // Ask the server to cancel a download, then refresh immediately
 async function cancelJob(jobId) {
   try {
-    await fetch(`${SERVER}/download/${jobId}`, { method: 'DELETE' });
+    await fetch(`${SERVER}/download/${jobId}`, { method: 'DELETE', signal: AbortSignal.timeout(10000) });
   } catch {
     // ignore — refresh below reflects whatever state the server is in
   }
@@ -116,17 +119,22 @@ async function cancelJob(jobId) {
 }
 
 // Fetch the current job list and render it
+let fetching = false;
 async function fetchAndRender() {
+  if (fetching) return;
+  fetching = true;
   try {
-    const res = await fetch(`${SERVER}/download/jobs`);
+    const res = await fetch(`${SERVER}/download/jobs`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('Server error');
     if (res.ok) {
       const data = await res.json();
       renderJobs(data.jobs);
     }
   } catch {
     document.getElementById('job-list').innerHTML =
-      '<div class="empty-state" style="color:#FF4444">Server not running</div>';
-  }
+      '<div class="empty-state"><div style="color:#FF4444">Server unavailable</div>' +
+      '<div style="color:#aaa;font-size:12px;line-height:1.5;margin-top:10px">' + SERVER_SETUP_HINT + '</div></div>';
+  } finally { fetching = false; }
 }
 
 // Render once on open, then poll on an interval

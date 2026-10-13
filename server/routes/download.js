@@ -1,391 +1,351 @@
 const { Router } = require('express');
 const { spawn, execFile } = require('child_process');
 const { randomUUID } = require('crypto');
-const os = require('os');
+const { StringDecoder } = require('string_decoder');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 
 const router = Router();
-
-// In-memory job tracker, resets on server restart
-const jobs = {};
-
-// Cap on simultaneous yt-dlp processes
+const jobs = new Map();
+const formatCache = new Map();
+// Full extractor results stay server-side; cap both entry count and size.
+const mediaInfoCache = new Map();
+const formatRequests = new Map();
+const lookupChildren = new Set();
+const downloadKeys = new Set();
+let pickerProcess = null;
+const pickerResults = new Map();
 let activeDownloads = 0;
-const MAX_CONCURRENT = 3;
-
-// Cap on simultaneous format lookups so /formats can't be used to spawn an
-// unbounded number of yt-dlp processes and exhaust the machine.
-let activeFormatFetches = 0;
-const MAX_FORMAT_FETCHES = 3;
-
-// Only one native folder picker may be open at a time — this stops a page from
-// spamming dialogs onto the user's screen.
 let pickerOpen = false;
+const MAX_CONCURRENT = 3;
+const CACHE_MS = 5 * 60 * 1000;
+const commonArgs = ['--ignore-config', '--no-playlist', '--js-runtimes', `node:${process.execPath}`, '--socket-timeout', '20'];
+if (path.isAbsolute(config.ffmpeg)) commonArgs.push('--ffmpeg-location', config.ffmpeg);
+const childOptions = { windowsHide: true };
 
-router.get('/formats', (req, res) => {
-  const { url } = req.query;
-
-  if (!url) {
-    return res.status(400).json({ error: 'url is required' });
-  }
-
-  const youtubeUrlPattern = /^https?:\/\/(www\.)?(youtube\.com\/watch\?.*v=|youtu\.be\/).+/;
-  if (!youtubeUrlPattern.test(url)) {
-    return res.status(400).json({ error: 'invalid YouTube URL' });
-  }
-
-  if (activeFormatFetches >= MAX_FORMAT_FETCHES) {
-    return res.status(429).json({ error: 'too many format requests' });
-  }
-  activeFormatFetches++;
-
+function youtubeUrl(value) {
+  if (typeof value !== 'string' || /\s/.test(value) || value.length > 2048) return null;
   try {
-    execFile('yt-dlp', ['--dump-json', '--skip-download', '--no-playlist', url], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      activeFormatFetches--;
-      if (err) {
-        return res.status(500).json({ error: 'failed to fetch formats' });
-      }
+    const url = new URL(value);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) return null;
+    let id;
+    if (['youtube.com', 'www.youtube.com', 'm.youtube.com'].includes(url.hostname) && url.pathname === '/watch') {
+      id = url.searchParams.get('v');
+    } else if (url.hostname === 'youtu.be' && /^\/[^/]+$/.test(url.pathname)) {
+      id = url.pathname.slice(1);
+    }
+    return /^[\w-]{11}$/.test(id || '') ? `https://www.youtube.com/watch?v=${id}` : null;
+  } catch { return null; }
+}
 
-      let parsed;
-      try {
-        parsed = JSON.parse(stdout);
-      } catch {
-        return res.status(500).json({ error: 'failed to fetch formats' });
-      }
+function timeSeconds(value) {
+  if (value === undefined || value === '') return null;
+  if (typeof value !== 'string' || !/^\d{2,}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) return NaN;
+  const [h, m, s] = value.split(':').map(Number);
+  return m < 60 && s < 60 && Number.isFinite(h) && h <= 9999 ? h * 3600 + m * 60 + s : NaN;
+}
 
-      const formats = parsed.formats || [];
+function insideHome(dir) {
+  const home = fs.realpathSync(config.home);
+  const resolved = fs.realpathSync(dir);
+  const relative = path.relative(home, resolved);
+  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('invalid output path');
+  }
+  fs.accessSync(resolved, fs.constants.W_OK);
+  return resolved;
+}
 
-      // YouTube serves video and audio as separate DASH streams; keep the
-      // video-only streams (no merged audio) so we see every real resolution
-      const videoStreams = formats.filter(f =>
-        f.vcodec && f.vcodec !== 'none' &&
-        (!f.acodec || f.acodec === 'none') &&
-        f.height
-      );
+function describeError(err) {
+  if (err.code === 'ENOENT') return 'yt-dlp not found. Run setup again or check your PATH.';
+  if (err.killed) return 'Format lookup timed out. Please try again.';
+  return (err.message || 'failed to fetch formats').slice(-2000);
+}
 
-      // Deduplicate by height, keep only the first entry per height value
-      const seen = new Set();
-      const unique = videoStreams.filter(f => {
-        if (seen.has(f.height)) return false;
-        seen.add(f.height);
-        return true;
+router.get('/formats', async (req, res) => {
+  const url = youtubeUrl(req.query.url);
+  if (!url) return res.status(400).json({ error: 'invalid YouTube URL' });
+  const cached = formatCache.get(url);
+  if (cached && cached.expires > Date.now()) return res.json(cached.value);
+  if (!formatRequests.has(url)) {
+    if (formatRequests.size >= MAX_CONCURRENT) return res.status(429).json({ error: 'too many format requests' });
+    const request = new Promise((resolve, reject) => {
+      const child = execFile(config.ytDlp, [...commonArgs, '--dump-single-json', '--skip-download', url], {
+        ...childOptions, maxBuffer: 10 * 1024 * 1024, timeout: config.formatTimeoutMs,
+      }, (err, stdout) => {
+        lookupChildren.delete(child);
+        if (err) return reject(err);
+        try {
+          const parsed = JSON.parse(stdout);
+          if (!Array.isArray(parsed.formats)) throw new Error('invalid formats response');
+          const heights = [...new Set(parsed.formats.filter(f => f.vcodec && f.vcodec !== 'none' && Number.isInteger(f.height) && f.height > 0).map(f => f.height))].sort((a, b) => b - a);
+          const formats = heights.map(height => ({
+            format_id: `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`,
+            label: `${height}p - video + audio`, type: 'video',
+          }));
+          formats.push({ format_id: 'bestaudio/best', label: 'Audio only (mp3)', type: 'audio' });
+          if (parsed.id === new URL(url).searchParams.get('v') && !parsed.is_live &&
+              parsed.live_status !== 'is_upcoming' && Buffer.byteLength(stdout) <= 2 * 1024 * 1024) {
+            parsed.webpage_url = url;
+            for (const [key, entry] of mediaInfoCache) {
+              if (entry.expires <= Date.now()) mediaInfoCache.delete(key);
+            }
+            mediaInfoCache.delete(url);
+            if (mediaInfoCache.size >= 8) mediaInfoCache.delete(mediaInfoCache.keys().next().value);
+            mediaInfoCache.set(url, { json: JSON.stringify(parsed), expires: Date.now() + CACHE_MS });
+          }
+          resolve({ formats });
+        } catch (error) { reject(error); }
       });
-
-      // Sort by height descending
-      unique.sort((a, b) => b.height - a.height);
-
-      // Use yt-dlp selector syntax so it merges with the best audio at download
-      const videoFormats = unique.map(f => ({
-        format_id: `bestvideo[height<=${f.height}]+bestaudio/best`,
-        label: f.height >= 2160 ? `4K - video + audio` : `${f.height}p - video + audio`,
-        type: 'video'
-      }));
-
-      // Always offer audio-only as the final option
-      const result = [
-        ...videoFormats,
-        { format_id: 'bestaudio/best', label: 'Audio only (mp3)', type: 'audio' }
-      ];
-
-      return res.json({ formats: result });
+      lookupChildren.add(child);
     });
-  } catch {
-    // execFile threw before the callback could run — release the slot here
-    activeFormatFetches--;
-    res.status(500).json({ error: 'failed to fetch formats' });
+    formatRequests.set(url, request);
+  }
+  const request = formatRequests.get(url);
+  try {
+    const value = await request;
+    if (formatCache.size >= 100) formatCache.delete(formatCache.keys().next().value);
+    formatCache.set(url, { value, expires: Date.now() + CACHE_MS });
+    res.json(value);
+  } catch (err) {
+    res.status(502).json({ error: describeError(err) });
+  } finally {
+    if (formatRequests.get(url) === request) formatRequests.delete(url);
   }
 });
 
+function publicJob(job) {
+  const { process: child, ...data } = job;
+  return data;
+}
 router.get('/status/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  if (!jobs[jobId]) {
-    return res.status(404).json({ error: 'job not found' });
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'job not found' });
+  res.json(publicJob(job));
+});
+router.get('/jobs', (req, res) => res.json({ jobs: [...jobs.values()].map(publicJob) }));
+
+function stopChild(child) {
+  if (process.platform === 'win32') {
+    // Killing yt-dlp alone leaves its ffmpeg child writing to disk on Windows.
+    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], childOptions);
+    killer.on('error', () => child.kill());
+    killer.on('close', code => { if (code !== 0) child.kill(); });
+  } else {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill(); }
   }
-  res.json({
-    status: jobs[jobId].status,
-    percent: jobs[jobId].percent || 0,
-    size: jobs[jobId].size || null,
-    speed: jobs[jobId].speed || null,
-    eta: jobs[jobId].eta || null,
-    error: jobs[jobId].error || null,
-  });
-});
-
-// Returns all tracked jobs so the popup can render a live download list
-router.get('/jobs', (req, res) => {
-  const jobList = Object.entries(jobs).map(([id, job]) => ({
-    jobId: id,
-    status: job.status,
-    percent: job.percent || 0,
-    size: job.size || null,
-    speed: job.speed || null,
-    eta: job.eta || null,
-    url: job.url || null,
-    error: job.error || null,
-  }));
-  res.json({ jobs: jobList });
-});
-
-// Cancels an in-progress download by killing its yt-dlp process
+}
 router.delete('/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  if (!jobs[jobId]) return res.status(404).json({ error: 'job not found' });
-  if (jobs[jobId].process) {
-    jobs[jobId].process.kill();
-    jobs[jobId].status = 'cancelled';
-    delete jobs[jobId].process;
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'job not found' });
+  if (job.process && job.status === 'pending') {
+    job.status = 'cancelled';
+    stopChild(job.process);
   }
-  res.json({ status: 'cancelled' });
+  res.json({ status: job.status });
 });
 
-// Opens a native folder picker and returns the chosen path.
-// Uses PowerShell on Windows and zenity on Linux.
+router.get('/pick-folder/:pickerId', (req, res) => {
+  const result = pickerResults.get(req.params.pickerId);
+  if (!result) return res.status(404).json({ error: 'folder picker result expired' });
+  res.json(result);
+});
+
 router.get('/pick-folder', (req, res) => {
-  const { spawn } = require('child_process');
-
-  // Refuse to open a second dialog while one is already on screen
-  if (pickerOpen) {
-    return res.status(429).json({ error: 'a folder picker is already open' });
-  }
+  if (pickerOpen) return res.status(429).json({ error: 'a folder picker is already open' });
   pickerOpen = true;
-
-  // A child process can emit both 'error' and 'close'. finish() guarantees we
-  // release the lock and send the HTTP response exactly once, so we never crash
-  // with "headers already sent".
+  const pickerId = randomUUID();
+  if (pickerResults.size >= 100) pickerResults.delete(pickerResults.keys().next().value);
+  pickerResults.set(pickerId, { status: 'pending' });
+  // A native dialog can stay open for minutes. Return immediately so Chrome's
+  // worker never waits beyond its 30 second fetch response limit.
+  res.status(202).json({ pickerId });
+  const windows = process.platform === 'win32';
+  const command = windows ? 'powershell.exe' : 'zenity';
+  const args = windows ? ['-NoProfile', '-STA', '-Command',
+    '[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding;' +
+    'Add-Type -AssemblyName System.Windows.Forms;' +
+    '$f=New-Object System.Windows.Forms.FolderBrowserDialog;' +
+    '$f.Description="Sur3aa - Choose download folder";' +
+    'try{if($f.ShowDialog() -eq "OK"){[Console]::WriteLine($f.SelectedPath)}}finally{$f.Dispose()}',
+  ] : ['--file-selection', '--directory', '--title=Sur3aa - Choose download folder'];
+  let child;
   let done = false;
-  const finish = (send) => {
+  let output = '';
+  let stderr = '';
+  let timeout;
+  const decoder = new StringDecoder('utf8');
+  const finish = result => {
     if (done) return;
     done = true;
+    clearTimeout(timeout);
     pickerOpen = false;
-    send();
+    pickerProcess = null;
+    pickerResults.set(pickerId, result);
+    setTimeout(() => pickerResults.delete(pickerId), config.retentionMs).unref();
   };
-
-  if (process.platform === 'win32') {
-    const ps = spawn('powershell', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      '[System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms")|Out-Null;' +
-      '$f=New-Object System.Windows.Forms.FolderBrowserDialog;' +
-      '$f.Description="Sur3aa - Choose download folder";' +
-      'if($f.ShowDialog() -eq "OK"){$f.SelectedPath}else{""}',
-    ]);
-
-    let selectedPath = '';
-
-    ps.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
-
-    ps.on('close', () => finish(() => {
-      if (selectedPath) return res.json({ path: selectedPath });
-      return res.status(204).end();
-    }));
-
-    ps.on('error', (err) => finish(() =>
-      res.status(500).json({ error: 'powershell not found', detail: err.message })));
-  } else {
-    const zenity = spawn('zenity', ['--file-selection', '--directory', '--title=Sur3aa - Choose download folder']);
-
-    let selectedPath = '';
-    let stderrOutput = '';
-
-    zenity.stdout.on('data', (data) => { selectedPath += data.toString().trim(); });
-    zenity.stderr.on('data', (data) => { stderrOutput += data.toString(); });
-
-    zenity.on('close', (code) => finish(() => {
-      if (code === 0 && selectedPath) return res.json({ path: selectedPath });
-      if (code === 1) return res.status(204).end();
-      return res.status(500).json({ error: 'zenity failed', detail: stderrOutput });
-    }));
-
-    zenity.on('error', (err) => finish(() =>
-      res.status(500).json({ error: 'zenity not found', detail: err.message })));
-  }
+  try {
+    child = spawn(command, args, childOptions);
+    pickerProcess = child;
+    child.stdout.on('data', chunk => { output += decoder.write(chunk); });
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
+    child.on('error', () => finish({ status: 'failed', error: `${command} unavailable. Run setup again.` }));
+    child.on('close', code => {
+      output += decoder.end();
+      const selected = output.replace(/\r?\n$/, '');
+      if (code === 0 && selected) return finish({ status: 'done', path: selected });
+      if (code === 0 || (!windows && code === 1)) return finish({ status: 'cancelled' });
+      finish({ status: 'failed', error: 'folder picker failed', detail: stderr });
+    });
+    timeout = setTimeout(() => { child.kill(); finish({ status: 'failed', error: 'folder picker timed out' }); }, 10 * 60 * 1000);
+    timeout.unref();
+  } catch { finish({ status: 'failed', error: 'folder picker unavailable' }); }
 });
 
 router.post('/', (req, res) => {
-  const { url, format } = req.body;
-  const outputPath = req.body.outputPath || null;
-  // Optional segment range, requires both to be present to trim the download
-  const startTime = (req.body.startTime || '').trim();
-  const endTime = (req.body.endTime || '').trim();
-
-  if (!url) {
-    return res.status(400).json({ error: 'url is required' });
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return res.status(400).json({ error: 'JSON object required' });
+  const url = youtubeUrl(body.url);
+  if (!url) return res.status(400).json({ error: 'invalid YouTube URL' });
+  const { format, outputPath, startTime, endTime } = body;
+  if (format !== undefined && format !== null && (!format || typeof format !== 'object' ||
+      !['audio', 'video'].includes(format.type) ||
+      (format.type === 'video' && (typeof format.format_id !== 'string' ||
+        !/^bestvideo\[height<=\d{2,5}\]\+bestaudio\/best(?:\[height<=\d{2,5}\])?$/.test(format.format_id))))) {
+    return res.status(400).json({ error: 'invalid format' });
   }
-
-  // Reject anything that isn't a recognizable YouTube watch URL
-  const youtubeUrlPattern = /^https?:\/\/(www\.)?(youtube\.com\/watch\?.*v=|youtu\.be\/).+/;
-  if (!youtubeUrlPattern.test(url)) {
-    return res.status(400).json({ error: 'invalid YouTube URL' });
+  const start = timeSeconds(startTime);
+  const end = timeSeconds(endTime);
+  if (Number.isNaN(start) || Number.isNaN(end) || (end !== null && end <= (start || 0))) {
+    return res.status(400).json({ error: 'invalid segment range, use HH:MM:SS with end after start' });
   }
-
-  // Reject outputPath that escapes the user's home directory.
-  // realpath resolves symlinks too, so a link inside home can't point outside it.
-  if (outputPath) {
+  let downloadDir;
+  try {
+    if (outputPath !== undefined && outputPath !== null && (typeof outputPath !== 'string' || !path.isAbsolute(outputPath))) throw new Error();
+    if (!outputPath) {
+      // Check existing ancestors first so a Downloads symlink cannot escape home.
+      insideHome(fs.existsSync(config.downloadPath) ? config.downloadPath : path.dirname(config.downloadPath));
+      fs.mkdirSync(config.downloadPath, { recursive: true });
+    }
+    downloadDir = insideHome(outputPath || config.downloadPath);
+  } catch { return res.status(400).json({ error: 'Choose an existing writable folder inside your home directory.' }); }
+  if (activeDownloads >= MAX_CONCURRENT) return res.status(429).json({ error: 'too many concurrent downloads (maximum 3)' });
+  if (jobs.size >= config.maxJobs) {
+    const terminal = [...jobs].find(([, job]) => job.status !== 'pending' && !job.process);
+    if (terminal) jobs.delete(terminal[0]);
+    else return res.status(429).json({ error: 'job limit reached' });
+  }
+  const isSegment = start !== null || end !== null;
+  const segmentDuration = end !== null ? end - (start || 0) : null;
+  const suffix = isSegment ? ` [${start || 0}-${end === null ? 'end' : end}]` : '';
+  // IDs prevent unrelated titles overwriting one another; clip ranges separate trims.
+  const kind = format?.type === 'audio' ? 'audio' : 'video';
+  const downloadKey = JSON.stringify([url, downloadDir, kind, start, end]);
+  if (downloadKeys.has(downloadKey)) return res.status(409).json({ error: 'This download is already running in that folder.' });
+  const typeLabel = kind === 'audio' ? ' [audio]' : ' [%(height)sp]';
+  const template = `%(title).150B [%(id)s]${typeLabel}${suffix}.%(ext)s`;
+  let tempDir;
+  // Keep intermediates on the destination filesystem so the final move is a
+  // rename, rather than copying the whole video out of /tmp or another drive.
+  try { tempDir = fs.mkdtempSync(path.join(downloadDir, '.sur3aa-download-')); }
+  catch { return res.status(500).json({ error: 'Cannot create a temporary download folder.' }); }
+  const args = [...commonArgs, '--windows-filenames', '-P', downloadDir, '-P', `temp:${tempDir}`, '-o', template, '--newline'];
+  if (format?.type === 'audio') args.push('-f', 'bestaudio/best', '-x', '--audio-format', 'mp3');
+  else args.push('-f', format?.format_id || 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best');
+  if (isSegment) args.push('--download-sections', `*${start || 0}-${end === null ? 'inf' : end}`, '--force-keyframes-at-cuts');
+  else args.push('--concurrent-fragments', '8');
+  let inputArgs = [url];
+  const mediaInfo = mediaInfoCache.get(url);
+  if (mediaInfo && mediaInfo.expires > Date.now()) {
+    const infoPath = path.join(tempDir, 'source.info.json');
     try {
-      const home = fs.realpathSync(os.homedir());
-      const resolved = fs.realpathSync(path.resolve(outputPath));
-      if (!resolved.startsWith(home + path.sep) && resolved !== home) {
-        return res.status(400).json({ error: 'invalid output path' });
-      }
+      fs.writeFileSync(infoPath, mediaInfo.json, { mode: 0o600 });
+      inputArgs = ['--load-info-json', infoPath];
     } catch {
-      // Path doesn't exist or can't be resolved — reject it
-      return res.status(400).json({ error: 'invalid output path' });
+      // A cache failure must not prevent the normal download path.
     }
+  } else {
+    mediaInfoCache.delete(url);
   }
-
-  if (activeDownloads >= MAX_CONCURRENT) {
-    return res.status(429).json({ error: 'too many concurrent downloads' });
-  }
-  activeDownloads++;
-
   const jobId = randomUUID();
-  jobs[jobId] = { status: 'pending', percent: 0, size: null, speed: null, eta: null, url };
-
-  // Respond immediately; yt-dlp runs in the background
-  res.json({ jobId, status: 'pending' });
-
-  // Use the user-picked folder when provided, otherwise the configured default
-  const downloadDir = outputPath || config.downloadPath;
-  const outputTemplate = downloadDir + '/%(title)s.%(ext)s';
-
-  let args;
-  if (format && format.type === 'audio') {
-    args = [url, '--no-playlist', '-x', '--audio-format', 'mp3', '-o', outputTemplate];
-  } else if (format && format.type === 'video') {
-    args = [url, '--no-playlist', '-f', format.format_id, '-o', outputTemplate];
-  } else {
-    args = [
-      url,
-      '--no-playlist',
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
-      '-o', outputTemplate,
-      '--merge-output-format', 'mp4',
-    ];
-  }
-
-  // NOTE: the web_safari client impersonation was removed. YouTube changed
-  // and it now returns "No video formats found!", failing every download.
-  // The default client works again; revisit only if throttling reappears.
-
-  const isSegment = startTime || endTime;
-
-  // Pre-compute segment duration in seconds so we can derive a progress % from
-  // ffmpeg's time= output (see stderr handler below). Only possible when both
-  // endpoints are known; open-ended clips (no endTime) get no percentage.
-  const parseHMS = (hms) => {
-    const p = hms.split(':').map(Number);
-    return p[0] * 3600 + p[1] * 60 + (p[2] || 0);
-  };
-  const segmentDuration = (isSegment && startTime && endTime)
-    ? parseHMS(endTime) - parseHMS(startTime)
-    : null;
-
-  if (isSegment) {
-    // --concurrent-fragments conflicts with --download-sections in yt-dlp;
-    // skip it for segment downloads so the slice actually works.
-    const start = startTime || '0';
-    const end   = endTime   || 'inf';
-    args.push('--download-sections', `*${start}-${end}`);
-  } else {
-    // Full downloads: 8 parallel fragments + larger read buffer for speed
-    args.push('--concurrent-fragments', '8', '--buffer-size', '16K');
-  }
-
-  // Force yt-dlp to emit one progress line per update (newline) instead of
-  // overwriting a terminal line with carriage returns (\r). Without this the
-  // stdout chunks contain \r-delimited updates that never match the \n split
-  // and progress stays stuck at 0%.
-  args.push('--newline');
-
-  let stderrOutput = '';
-  const proc = spawn('yt-dlp', args);
-  // Keep a handle on the process so the DELETE route can cancel it
-  jobs[jobId].process = proc;
-
-  proc.stderr.on('data', (chunk) => {
-    const text = chunk.toString();
-    stderrOutput += text;
-
-    // With --download-sections, yt-dlp hands the URLs directly to ffmpeg and
-    // emits NO [download] X% lines. ffmpeg writes its own progress to stderr:
-    //   frame=  20 fps=25 q=28.0 size=  1234kB time=00:00:04.10 speed=4.00x
-    // We parse "time=" to get elapsed output seconds and divide by the known
-    // segment duration to produce a real percentage.
-    if (isSegment && segmentDuration > 0) {
-      const m = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
-      if (m) {
-        const elapsed = parseHMS(m[1]);
-        jobs[jobId].percent = Math.min(99, Math.round(elapsed / segmentDuration * 100));
-        const speedMatch = text.match(/speed=\s*([\d.]+x)/);
-        if (speedMatch) jobs[jobId].speed = speedMatch[1];
-      }
-    }
-  });
-
-  // A missing yt-dlp fires both 'error' and 'close'; finalize only once so the
-  // concurrency counter stays accurate and the cap keeps working.
+  const job = { jobId, status: 'pending', percent: 0, size: null, speed: null, eta: null, error: null, url };
+  jobs.set(jobId, job);
+  activeDownloads++;
+  downloadKeys.add(downloadKey);
   let finalized = false;
-  function finalize() {
+  const finalize = (status, error = null) => {
     if (finalized) return;
     finalized = true;
     activeDownloads--;
-    // Clean up after 5 minutes to prevent memory leaks
-    setTimeout(() => delete jobs[jobId], 5 * 60 * 1000);
-  }
-
-  // Handles the case where yt-dlp is not installed or not in PATH
-  proc.on('error', (err) => {
-    delete jobs[jobId].process;
-    jobs[jobId].status = 'failed';
-    jobs[jobId].error = err.code === 'ENOENT'
-      ? 'yt-dlp not found — is it installed and in PATH?'
-      : err.message;
-    finalize();
-  });
-
-  // Parse yt-dlp's [download] progress lines off stdout into the job record.
-  // Split on both \n and \r so progress updates aren't missed if a chunk
-  // arrives with carriage returns (can happen even with --newline on some builds).
-  proc.stdout.on('data', (data) => {
-    const lines = data.toString().split(/[\n\r]+/);
-    lines.forEach((line) => {
-      // `~?` also matches yt-dlp's estimated-size lines (e.g. "of ~12.00MiB")
-      const match = line.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);
-      if (match) {
-        jobs[jobId].percent = parseFloat(match[1]);
-        jobs[jobId].size = match[2];
-        jobs[jobId].speed = match[3];
-        jobs[jobId].eta = match[4];
-      }
+    downloadKeys.delete(downloadKey);
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    delete job.process;
+    if (job.status !== 'cancelled') job.status = status;
+    job.error = error;
+    if (job.status === 'done') job.percent = 100;
+    const timer = setTimeout(() => jobs.delete(jobId), config.retentionMs);
+    timer.unref();
+  };
+  let stderrOutput = '';
+  function lines(stream, onLine) {
+    const decoder = new StringDecoder('utf8');
+    let buffer = '';
+    stream.on('data', chunk => {
+      buffer += decoder.write(chunk);
+      const parts = buffer.split(/[\r\n]+/);
+      buffer = parts.pop().slice(-8192);
+      parts.forEach(onLine);
     });
-  });
-
-  proc.on('close', (code) => {
-    delete jobs[jobId].process;
-    // If the 'error' handler already recorded the outcome, don't overwrite its
-    // (more descriptive) message with a generic one.
-    if (finalized) return;
-    // A killed (cancelled) process stays cancelled; don't overwrite its status
-    if (jobs[jobId].status === 'cancelled') {
-      finalize();
-      return;
-    }
-    if (code === 0) {
-      jobs[jobId].status = 'done';
-      jobs[jobId].percent = 100;
-    } else {
-      jobs[jobId].status = 'failed';
-      // Use the last non-empty stderr line as the error message
-      const lastMeaningfulLine = stderrOutput
-        .split('\n')
-        .map(l => l.trim())
-        .filter(Boolean)
-        .pop() || 'unknown error';
-      jobs[jobId].error = lastMeaningfulLine;
-    }
-    finalize();
-  });
+    stream.on('end', () => { buffer += decoder.end(); if (buffer) onLine(buffer); });
+  }
+  function startDownload(input, cached) {
+    try {
+      const child = spawn(config.ytDlp, [...args, ...input], { ...childOptions, detached: process.platform !== 'win32' });
+      job.process = child;
+      lines(child.stderr, line => {
+        stderrOutput = (stderrOutput + '\n' + line).slice(-8192);
+        if (job.status !== 'pending') return;
+        const time = line.match(/time=(\d{2,}:\d{2}:\d{2}(?:\.\d+)?)/);
+        if (isSegment && segmentDuration > 0 && time) {
+          job.percent = Math.min(99, Math.round(timeSeconds(time[1]) / segmentDuration * 100));
+          const speed = line.match(/speed=\s*([\d.]+x)/);
+          if (speed) job.speed = speed[1];
+        }
+      });
+      lines(child.stdout, line => {
+        if (job.status !== 'pending') return;
+        const progress = line.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);
+        if (progress) {
+          job.percent = Math.min(99, Number(progress[1]));
+          [job.size, job.speed, job.eta] = progress.slice(2);
+        }
+      });
+      child.on('error', err => finalize('failed', describeError(err)));
+      child.on('close', code => {
+        if (finalized) return;
+        // Signed media URLs can expire early. Refresh once without losing the job
+        // or retrying disk/encoder failures that a new extraction cannot fix.
+        if (code !== 0 && cached && job.status === 'pending' &&
+            /(?:HTTP Error|Server returned)\s*(?:403|404|410)\b|Requested format is not available/i.test(stderrOutput)) {
+          mediaInfoCache.delete(url);
+          stderrOutput = '';
+          Object.assign(job, { percent: 0, size: null, speed: null, eta: null });
+          startDownload([url], false);
+          return;
+        }
+        finalize(code === 0 ? 'done' : 'failed', code === 0 || job.status === 'cancelled' ? null : stderrOutput.trim().split(/[\r\n]+/).pop() || 'Download failed. Check yt-dlp and ffmpeg.');
+      });
+    } catch (err) { finalize('failed', describeError(err)); }
+  }
+  startDownload(inputArgs, inputArgs[0] === '--load-info-json');
+  res.json({ jobId, status: job.status });
 });
 
+// Terminate download process trees when the server exits.
+router.shutdown = () => {
+  for (const job of jobs.values()) if (job.process) stopChild(job.process);
+  for (const child of lookupChildren) child.kill();
+  pickerProcess?.kill();
+};
 module.exports = router;

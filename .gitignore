@@ -2,3 +2,6 @@ node_modules/
 .DS_Store
 *.log
 .claude/
+.aws
+server/tools.json
+server/runtime.json

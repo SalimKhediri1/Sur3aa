@@ -1,14 +1,30 @@
-const DOWNLOAD_ENDPOINT = 'http://localhost:3333/download';
-const STATUS_ENDPOINT = 'http://localhost:3333/download/status';
-const FORMATS_ENDPOINT = 'http://localhost:3333/download/formats';
-const PICK_FOLDER_ENDPOINT = 'http://localhost:3333/download/pick-folder';
+// Send local API requests through the extension worker's host permission.
+async function serverFetch(url, options = {}) {
+  const parsed = new URL(url);
+  if (parsed.origin !== 'http://127.0.0.1:3333') throw new Error('Invalid server URL');
+  const result = await chrome.runtime.sendMessage({
+    type: 'sur3aa-request', path: parsed.pathname + parsed.search,
+    method: options.method || 'GET', body: options.body,
+  });
+  if (!result || result.error) throw new Error(result?.error || 'Server unavailable');
+  return { ok: result.ok, status: result.status, json: async () => result.data };
+}
 
-// Guards against firing a second download while one is already running
+const DOWNLOAD_ENDPOINT = 'http://127.0.0.1:3333/download';
+const STATUS_ENDPOINT = 'http://127.0.0.1:3333/download/status';
+const FORMATS_ENDPOINT = 'http://127.0.0.1:3333/download/formats';
+const PICK_FOLDER_ENDPOINT = 'http://127.0.0.1:3333/download/pick-folder';
+const SERVER_SETUP_HINT = /Windows/.test(navigator.userAgent)
+  ? 'Run setup.bat in the project folder to install and start the local server.'
+  : 'Run ./setup.sh in the project folder to install and start the local server.';
+
+// Guards against submitting two requests at the same time
 let downloadInProgress = false;
 
 // Per-page format cache so the panel can open instantly with real formats
 let cachedFormats = null;
 let formatsLoading = false;
+let formatsPromise = null;
 // Tracks which URL the in-flight prefetch is for — used to discard stale results
 let prefetchingForUrl = null;
 
@@ -16,14 +32,17 @@ let prefetchingForUrl = null;
 // progressPollInterval holds the poll loop so it can be cleared when idle.
 const activeJobs = {};
 let progressPollInterval = null;
+let progressCleanupTimer = null;
+let progressPolling = false;
+let progressGeneration = 0;
 
 // Static format list — yt-dlp resolves the best match at download time
 const STATIC_FORMATS = [
-  { format_id: 'bestvideo[height<=2160]+bestaudio/best', label: '4K (best available)', type: 'video' },
-  { format_id: 'bestvideo[height<=1080]+bestaudio/best', label: '1080p', type: 'video' },
-  { format_id: 'bestvideo[height<=720]+bestaudio/best',  label: '720p',  type: 'video' },
-  { format_id: 'bestvideo[height<=480]+bestaudio/best',  label: '480p',  type: 'video' },
-  { format_id: 'bestvideo[height<=360]+bestaudio/best',  label: '360p',  type: 'video' },
+  { format_id: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]', label: '4K (best available)', type: 'video' },
+  { format_id: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]', label: '1080p', type: 'video' },
+  { format_id: 'bestvideo[height<=720]+bestaudio/best[height<=720]',  label: '720p',  type: 'video' },
+  { format_id: 'bestvideo[height<=480]+bestaudio/best[height<=480]',  label: '480p',  type: 'video' },
+  { format_id: 'bestvideo[height<=360]+bestaudio/best[height<=360]',  label: '360p',  type: 'video' },
   { format_id: 'bestaudio/best', label: 'Audio only (mp3)', type: 'audio' },
 ];
 
@@ -31,7 +50,7 @@ const STATIC_FORMATS = [
 // Returns an array of format objects, or null if the server can't be reached.
 async function fetchFormats(url) {
   try {
-    const res = await fetch(FORMATS_ENDPOINT + '?url=' + encodeURIComponent(url));
+    const res = await serverFetch(FORMATS_ENDPOINT + '?url=' + encodeURIComponent(url));
     if (!res.ok) return null;
     const data = await res.json();
     return data.formats || null;
@@ -57,7 +76,8 @@ function showLoadingState(contentDiv) {
 async function prefetchFormats(url) {
   prefetchingForUrl = url;
   formatsLoading = true;
-  const formats = await fetchFormats(url);
+  formatsPromise = fetchFormats(url);
+  const formats = await formatsPromise;
   // Navigation happened while this was in flight — throw the result away
   if (prefetchingForUrl !== url) return;
   if (formats) cachedFormats = formats;
@@ -91,6 +111,7 @@ function createPanel() {
 
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '✕';
+  closeBtn.setAttribute('aria-label', 'Close panel');
   closeBtn.style.background = 'none';
   closeBtn.style.border = 'none';
   closeBtn.style.color = '#FF4444';
@@ -139,7 +160,7 @@ function createRangeSlider(duration) {
     document.head.appendChild(style);
   }
 
-  const max = Math.floor(duration);
+  const max = Math.max(1, Math.floor(duration));
 
   const wrapper = document.createElement('div');
   wrapper.style.marginBottom = '10px';
@@ -184,6 +205,7 @@ function createRangeSlider(duration) {
 
   const startInput = document.createElement('input');
   startInput.type = 'range';
+  startInput.setAttribute('aria-label', 'Segment start');
   startInput.className = 'sur3aa-range';
   startInput.min = 0;
   startInput.max = max;
@@ -191,6 +213,7 @@ function createRangeSlider(duration) {
 
   const endInput = document.createElement('input');
   endInput.type = 'range';
+  endInput.setAttribute('aria-label', 'Segment end');
   endInput.className = 'sur3aa-range';
   endInput.min = 0;
   endInput.max = max;
@@ -277,7 +300,9 @@ function showFormats(contentDiv, formats) {
       btn.style.borderColor = '#CC0000';
       btn.style.color = '#FF4444';
     }
+    const selectedUrl = window.location.href;
     btn.addEventListener('click', async () => {
+      if (downloadInProgress) return;
       // Read slider values before the panel is removed
       const startTime = slider ? slider.getStartTime() : '';
       const endTime = slider ? slider.getEndTime() : '';
@@ -312,7 +337,9 @@ function showFormats(contentDiv, formats) {
           btn.style.opacity = '1';
           btn.style.cursor = 'pointer';
         }
-        showStatus('✗ Server not running', 'failed');
+        showStatus('✗ Server offline, check extension popup', 'failed');
+        const status = document.getElementById('sur3aa-status');
+        if (status) status.title = SERVER_SETUP_HINT;
         setTimeout(clearStatus, 4000);
         return;
       }
@@ -329,7 +356,9 @@ function showFormats(contentDiv, formats) {
         return;
       }
 
-      triggerDownload(format, outputPath, startTime, endTime);
+      // Navigation while the native picker was open must not download another video.
+      if (window.location.href !== selectedUrl) return;
+      triggerDownload(format, outputPath, startTime, endTime, selectedUrl);
     });
     contentDiv.appendChild(btn);
   });
@@ -375,11 +404,12 @@ function clearStatus() {
 }
 
 // onEnd is called on every terminal path so the caller can release its lock
-async function pollStatus(jobId, onEnd) {
+async function pollStatus(jobId, onEnd, pageUrl) {
   let polls = 0;
-  const MAX_POLLS = 300; // 300 × 2 s = 10 min; covers large downloads
+  const MAX_POLLS = 43200; // Stop tracking after 24 hours
 
   async function tick() {
+    if (window.location.href !== pageUrl) { onEnd(); return; }
     if (polls >= MAX_POLLS) {
       // Stop inline tracking; the progress panel continues independently
       clearStatus();
@@ -390,7 +420,7 @@ async function pollStatus(jobId, onEnd) {
 
     let data;
     try {
-      const res = await fetch(STATUS_ENDPOINT + '/' + jobId);
+      const res = await serverFetch(STATUS_ENDPOINT + '/' + jobId);
       if (res.status === 404) {
         // Job gone — server restarted or job expired after completion
         showStatus('✗ Download lost — server restarted?', 'failed');
@@ -403,6 +433,7 @@ async function pollStatus(jobId, onEnd) {
         return;
       }
       data = await res.json();
+      if (window.location.href !== pageUrl) { onEnd(); return; }
     } catch {
       showStatus('✗ Could not reach server', 'failed');
       onEnd();
@@ -476,7 +507,9 @@ function injectButton() {
       showFormats(contentDiv, cachedFormats);
     } else {
       showLoadingState(contentDiv);
-      fetchFormats(window.location.href).then((formats) => {
+      const panelUrl = window.location.href;
+      (formatsLoading ? formatsPromise : fetchFormats(panelUrl)).then((formats) => {
+        if (!contentDiv.isConnected || panelUrl !== window.location.href) return;
         if (formats) {
           cachedFormats = formats;
           showFormats(contentDiv, formats);
@@ -555,6 +588,7 @@ function createProgressPanel() {
 
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '✕';
+  closeBtn.setAttribute('aria-label', 'Close panel');
   closeBtn.style.background = 'none';
   closeBtn.style.border = 'none';
   closeBtn.style.color = '#FF4444';
@@ -564,6 +598,8 @@ function createProgressPanel() {
   // Closing cleanly stops all polling and clears the panel's state
   closeBtn.addEventListener('click', () => {
     panel.remove();
+    progressGeneration++;
+    clearTimeout(progressCleanupTimer);
     clearInterval(progressPollInterval);
     progressPollInterval = null;
     for (const id in activeJobs) delete activeJobs[id];
@@ -659,7 +695,7 @@ function renderProgressPanel() {
     detail.style.whiteSpace = 'nowrap';
     detail.style.maxWidth = '250px';
     if (job.status === 'pending') {
-      detail.textContent = `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`;
+      detail.textContent = job.error || `${job.percent || 0}% · ${job.speed || '—'} · ETA ${job.eta || '—'}`;
     } else if (job.status === 'failed') {
       // Show the real reason (truncated) and keep the full text as a tooltip
       detail.textContent = shortenError(job.error) || 'Failed';
@@ -694,7 +730,7 @@ function renderProgressPanel() {
 // Asks the server to cancel a job, then refreshes the panel
 async function cancelDownload(jobId) {
   try {
-    await fetch('http://localhost:3333/download/' + jobId, { method: 'DELETE' });
+    await serverFetch('http://127.0.0.1:3333/download/' + jobId, { method: 'DELETE' });
   } catch {
     // ignore — the poll below reflects whatever state the server reports
   }
@@ -711,14 +747,24 @@ function ensureProgressPanel() {
 // Polls the server's job list, updates activeJobs, and re-renders.
 // Stops polling and clears the panel once every job is in a terminal state.
 async function pollProgressPanel() {
+  if (progressPolling) return;
+  progressPolling = true;
+  const generation = progressGeneration;
   let data;
   try {
-    const res = await fetch('http://localhost:3333/download/jobs');
+    const res = await serverFetch('http://127.0.0.1:3333/download/jobs');
     if (!res.ok) return;
     data = await res.json();
   } catch {
+    if (generation === progressGeneration) {
+      for (const job of Object.values(activeJobs)) {
+        if (job.status === 'pending') job.error = 'Cannot reach server, retrying…';
+      }
+      renderProgressPanel();
+    }
     return;
-  }
+  } finally { progressPolling = false; }
+  if (generation !== progressGeneration) return;
 
   const serverJobs = data.jobs || [];
   const serverIds = new Set(serverJobs.map((j) => j.jobId));
@@ -750,40 +796,39 @@ async function pollProgressPanel() {
   if (allTerminal) {
     clearInterval(progressPollInterval);
     progressPollInterval = null;
-    setTimeout(() => {
+    clearTimeout(progressCleanupTimer);
+    progressCleanupTimer = setTimeout(() => {
+      if (Object.values(activeJobs).some(job => job.status === 'pending')) return;
       document.getElementById('sur3aa-progress-panel')?.remove();
       for (const id in activeJobs) delete activeJobs[id];
     }, 5000);
   }
 }
 
-// Asks the server to open a native folder picker.
-// Returns the chosen path string on success, null if the user cancelled, or
-// false if the server could not be reached / zenity failed.
-// Returns: path string on success, null if cancelled, false if server is down,
-// or { pickError: string } if the server responded but the picker failed (e.g. zenity missing).
+// Open the native picker, then use short requests while the user chooses.
 async function pickFolder() {
   try {
-    const res = await fetch(PICK_FOLDER_ENDPOINT);
-    if (res.status === 204) return null;
-    if (!res.ok) {
-      let msg = 'folder picker unavailable';
-      try { msg = (await res.json()).error || msg; } catch {}
-      return { pickError: msg };
+    const response = await serverFetch(PICK_FOLDER_ENDPOINT);
+    const started = await response.json();
+    if (!response.ok) return { pickError: started.error || 'folder picker unavailable' };
+    for (;;) {
+      const res = await serverFetch(PICK_FOLDER_ENDPOINT + '/' + started.pickerId);
+      const result = await res.json();
+      if (!res.ok) return { pickError: result.error || 'folder picker unavailable' };
+      if (result.status === 'done') return result.path;
+      if (result.status === 'cancelled') return null;
+      if (result.status === 'failed') return { pickError: result.error || 'folder picker failed' };
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const data = await res.json();
-    return data.path || false;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-async function triggerDownload(format, outputPath = null, startTime = '', endTime = '') {
-  // Refuse to start a second download while one is still running
+async function triggerDownload(format, outputPath = null, startTime = '', endTime = '', url = window.location.href) {
+  // Serialize submissions, active downloads can run concurrently
   if (downloadInProgress) return;
   downloadInProgress = true;
 
-  // Disable the button while the download runs
+  // Disable the button until the server accepts the request
   const btn = document.getElementById('sur3aa-btn');
   if (btn) {
     btn.disabled = true;
@@ -801,28 +846,31 @@ async function triggerDownload(format, outputPath = null, startTime = '', endTim
     }
   }
 
-  const url = window.location.href;
   try {
-    const res = await fetch(DOWNLOAD_ENDPOINT, {
+    const res = await serverFetch(DOWNLOAD_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, format, outputPath, startTime, endTime }),
     });
     if (res.ok) {
       const { jobId } = await res.json();
-      showStatus('⏳ Downloading...', 'pending');
+      if (window.location.href === url) showStatus('⏳ Downloading...', 'pending');
 
+      endDownload();
+      clearTimeout(progressCleanupTimer);
       // Seed and show the injected progress panel for this job
-      activeJobs[jobId] = { jobId, status: 'pending', percent: 0, speed: null, eta: null, url: window.location.href };
+      activeJobs[jobId] = { jobId, status: 'pending', percent: 0, speed: null, eta: null, url };
+      if (window.location.pathname !== '/watch') return;
       ensureProgressPanel();
       renderProgressPanel();
       if (!progressPollInterval) {
         progressPollInterval = setInterval(pollProgressPanel, 2000);
       }
 
-      pollStatus(jobId, endDownload);
+      pollStatus(jobId, () => {}, url);
     } else {
-      showStatus('✗ Server error', 'failed');
+      const error = await res.json();
+      showStatus('✗ ' + (error.error || 'Server error'), 'failed');
       endDownload();
     }
   } catch {
@@ -831,7 +879,15 @@ async function triggerDownload(format, outputPath = null, startTime = '', endTim
   }
 }
 
+let injectionObserver = null;
+let injectionTimer = null;
 function onVideoPage() {
+  injectionObserver?.disconnect();
+  clearTimeout(injectionTimer);
+  document.getElementById('sur3aa-panel')?.remove();
+  document.getElementById('sur3aa-btn')?.remove();
+  clearStatus();
+  downloadInProgress = false;
   // Invalidate any previous video's cache and cancel the in-flight prefetch
   cachedFormats = null;
   formatsLoading = false;
@@ -841,14 +897,7 @@ function onVideoPage() {
   injectButton();
 
   // YouTube renders lazily — retry injection on DOM mutations until it succeeds
-  let attempts = 0;
   const observer = new MutationObserver(function () {
-    attempts++;
-    // Give up after 50 mutations so we don't observe forever on non-video pages
-    if (attempts > 50) {
-      observer.disconnect();
-      return;
-    }
     if (!document.getElementById('sur3aa-btn')) {
       const target = document.querySelector('#above-the-fold #top-row');
       if (target) injectButton();
@@ -857,22 +906,35 @@ function onVideoPage() {
       observer.disconnect();
     }
   });
+  injectionObserver = observer;
   observer.observe(document.body, { childList: true, subtree: true });
+  injectionTimer = setTimeout(() => observer.disconnect(), 30000);
+  if (document.getElementById('sur3aa-btn')) observer.disconnect();
+  if (Object.keys(activeJobs).length) {
+    ensureProgressPanel();
+    renderProgressPanel();
+    if (!progressPollInterval) progressPollInterval = setInterval(pollProgressPanel, 2000);
+    pollProgressPanel();
+  }
 }
 
-if (window.location.href.includes('/watch')) {
+if (window.location.pathname === '/watch' && new URLSearchParams(window.location.search).has('v')) {
   onVideoPage();
 }
 
 // YouTube is a single-page app — navigating between pages does not reload the
 // extension, so we listen for YouTube's internal navigation event instead
 window.addEventListener('yt-navigate-finish', function () {
-  if (window.location.href.includes('/watch')) {
+  if (window.location.pathname === '/watch' && new URLSearchParams(window.location.search).has('v')) {
     // Reset the poll loop so it restarts cleanly when the next download begins
     clearInterval(progressPollInterval);
     progressPollInterval = null;
     onVideoPage();
   } else {
+    injectionObserver?.disconnect();
+    clearTimeout(injectionTimer);
+    progressGeneration++;
+    clearTimeout(progressCleanupTimer);
     document.getElementById('sur3aa-btn')?.remove();
     document.getElementById('sur3aa-panel')?.remove();
     clearStatus();

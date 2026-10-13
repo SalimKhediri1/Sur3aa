@@ -6,15 +6,18 @@
   "icons": {
     "48": "icons/icon48.png"
   },
-  "permissions": ["activeTab"],
+  "permissions": [],
   "host_permissions": [
-    "https://www.youtube.com/*",
-    "http://localhost:3333/*"
+    "http://127.0.0.1:3333/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["content_script.js"],
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content_script.js"
+      ],
       "run_at": "document_idle"
     }
   ],

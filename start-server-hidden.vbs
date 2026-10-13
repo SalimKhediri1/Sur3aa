@@ -1,7 +1,6 @@
-' Launches the Sur3aa Node.js server silently, no CMD window appears.
-' Window style 0 = hidden; False = do not wait for the process to exit.
-Dim fso, dir, cmd
+' Launch the script in the project directory. The Startup shortcut points here.
+Dim fso, projectDir, cmd
 Set fso = CreateObject("Scripting.FileSystemObject")
-dir = fso.GetParentFolderName(WScript.ScriptFullName)
-cmd = "node """ & dir & "\server\index.js"""
+projectDir = fso.GetParentFolderName(WScript.ScriptFullName)
+cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & projectDir & "\windows-server.ps1"" -Action Start"
 CreateObject("WScript.Shell").Run cmd, 0, False

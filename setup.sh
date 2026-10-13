@@ -1,141 +1,112 @@
 #!/usr/bin/env bash
-#
-# Sur3aa setup script for Linux and macOS.
-# Installs ffmpeg, yt-dlp, and the server's Node.js dependencies.
-#
-# Usage:
-#   chmod +x setup.sh
-#   ./setup.sh
-#
-# Exits with a clear message if any step fails.
-
-set -e
-
-# Resolve the project root so the script works no matter where it's called from
+# Linux setup. Run without sudo, package installation requests it when needed.
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# --- Detect the operating system ---
-OS="$(uname -s)"
-case "$OS" in
-  Linux)  PLATFORM="linux" ;;
-  Darwin) PLATFORM="macos" ;;
-  *)
-    echo "Error: unsupported operating system '$OS'. This script supports Linux and macOS only."
-    exit 1
-    ;;
-esac
-
-echo "==> Detected platform: $PLATFORM"
-
-# --- Install ffmpeg and zenity ---
-# ffmpeg merges the video/audio streams; zenity provides the folder picker dialog.
-echo "==> Installing ffmpeg and zenity..."
-if [ "$PLATFORM" = "linux" ]; then
-  if command -v apt >/dev/null 2>&1; then
-    sudo apt install -y ffmpeg zenity
-  elif command -v dnf >/dev/null 2>&1; then
-    # Fedora fallback when apt isn't available
-    sudo dnf install -y ffmpeg zenity
-  else
-    echo "Error: neither apt nor dnf was found. Please install ffmpeg and zenity manually, then re-run this script."
-    exit 1
-  fi
-elif [ "$PLATFORM" = "macos" ]; then
-  if command -v brew >/dev/null 2>&1; then
-    brew install ffmpeg
-  else
-    echo "Error: Homebrew is not installed."
-    echo "Install it first from https://brew.sh then re-run this script."
-    exit 1
-  fi
-fi
-
-# --- Install yt-dlp ---
-echo "==> Installing yt-dlp..."
-YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-
-if [ "$PLATFORM" = "linux" ]; then
-  YTDLP_DIR="$HOME/.local/bin"
-else
-  YTDLP_DIR="/usr/local/bin"
-fi
-YTDLP_PATH="$YTDLP_DIR/yt-dlp"
-
-# ~/.local/bin may not exist yet on a fresh Linux install
-mkdir -p "$YTDLP_DIR"
-
-# Prefer curl, fall back to wget
-if command -v curl >/dev/null 2>&1; then
-  curl -L "$YTDLP_URL" -o "$YTDLP_PATH"
-elif command -v wget >/dev/null 2>&1; then
-  wget -O "$YTDLP_PATH" "$YTDLP_URL"
-else
-  echo "Error: neither curl nor wget was found. Please install one of them, then re-run this script."
-  exit 1
-fi
-
-chmod +x "$YTDLP_PATH"
-echo "==> yt-dlp installed to $YTDLP_PATH"
-
-# --- Ensure ~/.local/bin is on PATH (Linux only) ---
-if [ "$PLATFORM" = "linux" ]; then
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*)
-      : # already on PATH, nothing to do
-      ;;
-    *)
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-      echo "==> Added ~/.local/bin to PATH in ~/.bashrc"
-      echo "    Run 'source ~/.bashrc' or restart your terminal for it to take effect."
-      ;;
+UPDATE_YTDLP=false
+NO_AUTOSTART=false
+for arg in "$@"; do
+  case "$arg" in
+    --update-ytdlp) UPDATE_YTDLP=true ;;
+    --no-autostart) NO_AUTOSTART=true ;;
+    *) echo "Usage: ./setup.sh [--update-ytdlp] [--no-autostart]"; exit 1 ;;
   esac
-fi
-
-# --- Install Node.js dependencies ---
-echo "==> Installing server dependencies..."
-if ! command -v npm >/dev/null 2>&1; then
-  echo "Error: npm was not found. Install Node.js (v18+) from https://nodejs.org then re-run this script."
+done
+if [ "$(uname -s)" != Linux ]; then
+  echo 'This script supports Linux. On Windows run setup.bat.'
   exit 1
 fi
-( cd "$SCRIPT_DIR/server" && npm install )
-
-# --- Install systemd user service (Linux only) ---
-if [ "$PLATFORM" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
-  echo "==> Installing Sur3aa as a background service..."
-
-  NODE_BIN="$(command -v node)"
-  SERVICE_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$SERVICE_DIR"
-
-  cat > "$SERVICE_DIR/sur3aa.service" << EOF
-[Unit]
+if ! command -v node >/dev/null || ! command -v npm >/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+  echo 'Install Node.js 22 or newer with npm, then run setup again.'
+  exit 1
+fi
+export PATH="$HOME/.local/bin:$PATH"
+missing=()
+for tool in ffmpeg zenity python3; do
+  command -v "$tool" >/dev/null || missing+=("$tool")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  if command -v apt-get >/dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  elif command -v dnf >/dev/null; then
+    sudo dnf install -y "${missing[@]}"
+  elif command -v pacman >/dev/null; then
+    # Avoid a partial Arch upgrade, the system should be updated before setup.
+    sudo pacman -S --needed "${missing[@]/python3/python}"
+  elif command -v zypper >/dev/null; then
+    sudo zypper install -y "${missing[@]}"
+  else
+    echo "Install these tools using your package manager, then run setup again: ${missing[*]}"
+    exit 1
+  fi
+fi
+if ! command -v yt-dlp >/dev/null || [ "$UPDATE_YTDLP" = true ]; then
+  mkdir -p "$HOME/.local/bin"
+  candidate="$(mktemp "$HOME/.local/bin/yt-dlp.XXXXXX")"
+  trap 'rm -f "$candidate"' EXIT
+  url='https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp'
+  if command -v curl >/dev/null; then
+    curl --fail --location --retry 2 "$url" -o "$candidate"
+  elif command -v wget >/dev/null; then
+    wget -O "$candidate" "$url"
+  else
+    echo 'Install curl or wget, then run setup again.'; exit 1
+  fi
+  chmod +x "$candidate"
+  "$candidate" --ignore-config --version
+  mv "$candidate" "$HOME/.local/bin/yt-dlp"
+  trap - EXIT
+fi
+(cd "$SCRIPT_DIR/server" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+# Record resolved tools for both manual and systemd launches.
+SUR3AA_TOOLS_FILE="$SCRIPT_DIR/server/tools.json" SUR3AA_YTDLP="$(command -v yt-dlp)" SUR3AA_FFMPEG="$(command -v ffmpeg)" node - <<'JS'
+require('fs').writeFileSync(process.env.SUR3AA_TOOLS_FILE, JSON.stringify({
+  ytDlp: process.env.SUR3AA_YTDLP, ffmpeg: process.env.SUR3AA_FFMPEG, node: process.execPath,
+}, null, 2));
+JS
+node "$SCRIPT_DIR/server/doctor.js"
+if [ "$NO_AUTOSTART" = true ]; then
+  echo "Setup complete. Start manually: node \"$SCRIPT_DIR/server/index.js\""
+  exit 0
+fi
+if ! command -v systemctl >/dev/null || ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo "Setup complete. No systemd user session is available. Start manually: node \"$SCRIPT_DIR/server/index.js\""
+  exit 0
+fi
+SERVICE_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SERVICE_DIR"
+# Quote paths and escape systemd specifiers for paths containing spaces or percent.
+SUR3AA_SERVICE_FILE="$SERVICE_DIR/sur3aa.service" SUR3AA_ENTRY="$SCRIPT_DIR/server/index.js" node - <<'JS'
+const quote = value => '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$') + '"';
+require('fs').writeFileSync(process.env.SUR3AA_SERVICE_FILE, `[Unit]
 Description=Sur3aa local download server
-After=network.target
+After=graphical-session.target
 
 [Service]
-ExecStart=$NODE_BIN $SCRIPT_DIR/server/index.js
+ExecStart=${quote(process.execPath)} ${quote(process.env.SUR3AA_ENTRY)}
 Restart=on-failure
 RestartSec=5
-Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target
-EOF
-
-  systemctl --user daemon-reload
-  systemctl --user enable sur3aa.service
-  # Restart instead of start so re-running setup picks up any changes
-  systemctl --user restart sur3aa.service
-  echo "==> Sur3aa server is running in the background and will start automatically on login"
-else
-  echo "==> Skipping service install (not Linux/systemd). Start the server manually with:"
-  echo "    node server/index.js"
+`);
+JS
+# Native dialogs need the current graphical session, not just the service PATH.
+for variable in DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS; do
+  if [ -n "${!variable:-}" ]; then systemctl --user import-environment "$variable"; fi
+done
+systemctl --user daemon-reload
+systemctl --user enable sur3aa.service
+systemctl --user restart sur3aa.service
+sleep 1
+if ! systemctl --user is-active --quiet sur3aa.service; then
+  echo 'Server startup failed. Run: journalctl --user -u sur3aa -n 30'
+  exit 1
 fi
-
-# --- Done ---
-echo ""
-echo "============================================"
-echo "  Sur3aa setup complete!"
-echo "============================================"
-echo "Load the extension in your browser (see the README)."
-echo "The server runs automatically in the background — no need to start it manually."
+node - <<'JS'
+fetch('http://127.0.0.1:3333/ping', { signal: AbortSignal.timeout(5000) })
+  .then(response => response.json()).then(data => {
+    if (data.app !== 'sur3aa') throw new Error('Unexpected server on port 3333');
+    console.log('Sur3aa is running and will start at login. Load the extension/ folder in your browser.');
+  }).catch(error => { console.error(error.message); process.exitCode = 1; });
+JS

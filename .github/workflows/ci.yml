@@ -1,0 +1,84 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: JavaScript syntax
+        run: |
+          node --check ../extension/background.js
+          node --check ../extension/content_script.js
+          node --check ../extension/popup/popup.js
+      - name: PowerShell syntax
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ../windows-server.ps1), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors) { $errors | Format-List; exit 1 }
+      - name: Windows tool path encoding
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./test/windows-encoding.ps1
+      - name: Linux setup syntax
+        if: runner.os == 'Linux'
+        run: bash -n ../setup.sh
+      - name: Browser behavior
+        if: runner.os == 'Linux'
+        env:
+          CHROME_BIN: google-chrome
+        run: npm run test:browser
+  windows-launch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Start and stop from a project folder with spaces and Unicode
+        shell: powershell
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP 'Sur3aa test é'
+          New-Item -ItemType Directory -Path $copy | Out-Null
+          Copy-Item * $copy -Recurse
+          Push-Location (Join-Path $copy 'server')
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          # Both tools.json and runtime.json must preserve a Unicode executable path in PS5.1.
+          $portable = Join-Path $copy ('portable tools ' + [char]0xE9)
+          New-Item -ItemType Directory $portable | Out-Null
+          $node = Join-Path $portable 'node.exe'
+          Copy-Item (Get-Command node.exe).Source $node
+          $tools = @{node=$node} | ConvertTo-Json
+          [IO.File]::WriteAllText((Join-Path $copy 'server\tools.json'), $tools, (New-Object System.Text.UTF8Encoding($false)))
+          & (Join-Path $copy 'windows-server.ps1') -Action Start
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          try {
+            $ping = Invoke-RestMethod http://127.0.0.1:3333/ping
+            if ($ping.app -ne 'sur3aa') { throw 'Server not reachable' }
+            & (Join-Path $copy 'windows-server.ps1') -Action Start
+          } finally {
+            & (Join-Path $copy 'windows-server.ps1') -Action Stop
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

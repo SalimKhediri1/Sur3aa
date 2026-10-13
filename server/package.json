@@ -1,16 +1,23 @@
 {
   "name": "sur3aa-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Local download server for the Sur3aa browser extension",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "doctor": "node doctor.js",
+    "test": "node --test test/*.test.js",
+    "test:browser": "node test/browser-smoke.js",
+    "test:live": "node test/live-download.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

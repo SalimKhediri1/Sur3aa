@@ -13,7 +13,7 @@ You need a **Windows 10/11** or **Linux** computer with a desktop, **Chrome or B
 ## 1. Download Sur3aa
 
 1. Open [Sur3aa on GitHub](https://github.com/SalimKhediri1/Sur3aa).
-2. Click the green **Code** button, then **Download ZIP**.
+2. Click the green/blue **Code** button, then **Download ZIP**.
 3. Extract the ZIP. On Windows, right-click it and choose **Extract All**. On Linux, use your archive app's **Extract** button.
 4. Put the extracted folder somewhere you will keep it, such as **Documents**. Open it: you should see `setup.bat`, `setup.sh`, and a folder named `extension`.
 

@@ -13,23 +13,21 @@ You need a **Windows 10/11** or **Linux** computer with a desktop, **Chrome or B
 ## 1. Download Sur3aa
 
 1. Open [Sur3aa on GitHub](https://github.com/SalimKhediri1/Sur3aa).
-2. Click the green/blue **Code** button, then **Download ZIP**.
-3. Extract the ZIP. On Windows, right-click it and choose **Extract All**. On Linux, use your archive app's **Extract** button.
-4. Put the extracted folder somewhere you will keep it, such as **Documents**. Open it: you should see `setup.bat`, `setup.sh`, and a folder named `extension`.
+2. Click the green/blue **Code** button, **Download ZIP** then Extract it.
+4. Put the extracted folder somewhere you will keep it, Open it: you should see `setup.bat`, `setup.sh`, and a folder named `extension`.
 
 Keep this folder after setup. Sur3aa needs the files inside it to run.
 
 ## 2. Set up your computer
 
-Follow the instructions for **your operating system**.
+Follow the instructions for **your operating system**
 
 ### Windows
 
 1. Visit [nodejs.org](https://nodejs.org/) and download the **LTS Windows installer**. Sur3aa needs Node.js version 22 or newer. Node.js is the program that runs the download helper.
 2. Open the installer and follow its steps. Keep the default options, including **npm**.
 3. Open your extracted Sur3aa folder and double-click **`setup.bat`**. If Windows hides file extensions, it may appear as **setup**, with the type **Windows Batch File**.
-4. Wait while setup downloads the tools it needs. Allow the installation prompts for those tools. Keep the window open while setup is running.
-5. When setup succeeds, the window may close. Continue to step 3 below. If it shows an error and stays open, read the [help section](#need-help).
+4. When setup succeeds, the window may close. Continue to step 3 below. If it shows an error and stays open, read the [help section](#need-help).
 
 The helper starts immediately and starts again when you sign in to Windows. You do not need to keep a terminal window open.
 
@@ -43,9 +41,7 @@ The helper starts immediately and starts again when you sign in to Windows. You 
    ```bash
    bash setup.sh
    ```
-
-5. If setup asks for your password to install missing tools, type your computer's password and press **Enter**. Linux does not display characters while you type a password; that is normal.
-6. Wait for **“Sur3aa is running and will start at login.”** Then continue to step 3 below.
+5. Wait for **“Sur3aa is running and will start at login.”** Then continue to step 3 below.
 
 Most Linux desktops can start the helper automatically when you sign in. If setup instead says **“Start manually”**, copy the command it prints, run it in that terminal, and keep the terminal open while using Sur3aa. Repeat that manual start after restarting your computer.
 
@@ -145,4 +141,4 @@ Stop the helper using the instructions below, then run setup from the folder's n
 
 ## For developers
 
-See [the developer guide](docs/development.md) for test commands and advanced setup options, and [the verification record](docs/release-verification.md) for tested behavior and remaining platform checks.
+See [the developer guide](docs/development.md) for test commands and advanced setup options, and [the verification record](docs/release-verification.md) for tested behavior and remain
